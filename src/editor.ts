@@ -53,9 +53,12 @@ export class TrackEditor {
     const extras: [string, () => CourseOp[]][] = [
       ['editBoost', () => boost(this.width, this.dir)],
       ['editJump', () => jump(this.width, 14, this.dir)],
-      ['editLoop', () => loop()],
-      ['editPads', () => rally([0, 8, -8], 10)],
-      ['editMaze', () => maze(this.seed++, 5, 5)],
+      ['editSnake', () => [{ op: 'wave', len: 64, width: this.width, amp: 5, waves: 1, kind: this.chosenKind }]],
+      ['editHoles', () => [{ op: 'field', len: 25, width: Math.max(this.width, 8), seed: this.seed++, holes: true, kind: this.chosenKind }]],
+      ['editPosts', () => [{ op: 'field', len: 25, width: Math.max(this.width, 8), seed: this.seed++, posts: true, kind: this.chosenKind }]],
+      ['editLoop', () => [...this.turningTo('N'), ...loop()]],
+      ['editPads', () => [...this.turningTo('N'), ...rally([0, 8, -8], 10)]],
+      ['editMaze', () => [...this.turningTo('N'), ...maze(this.seed++, 7, 7)]],
       ['editPiston', () => pistons(1, this.width, 3, this.dir)],
       ['editLaser', () => lasers(1, this.width, 2.6, this.dir)],
       ['editMagnet', () => magnets(1, this.width, this.dir)],
@@ -98,6 +101,7 @@ export class TrackEditor {
       for (let j = this.pieces[i].length - 1; j >= 0; j--) {
         const op = this.pieces[i][j];
         if (op.op === 'run') return op.dir;
+        if (op.op === 'bend') return op.to;
       }
     }
     return 'N';
@@ -107,7 +111,7 @@ export class TrackEditor {
     for (let i = this.pieces.length - 1; i >= 0; i--) {
       for (let j = this.pieces[i].length - 1; j >= 0; j--) {
         const op = this.pieces[i][j];
-        if (op.op === 'run') return op.width;
+        if (op.op === 'run' || op.op === 'bend' || op.op === 'wave' || op.op === 'field') return op.width;
       }
     }
     return this.width;
@@ -124,9 +128,18 @@ export class TrackEditor {
     return { version: 1, id: this.id, name, kind: 'course', ops: [...this.opsOf(this.pieces), ...finish(this.lastWidth, this.dir)] };
   }
 
+  private get chosenKind(): Kind | undefined {
+    return this.surface === 'plain' ? undefined : this.surface;
+  }
+
+  // The road curves round to a new heading rather than turning square.
+  private turningTo(dir: Dir): CourseOp[] {
+    return dir === this.dir ? [] : [{ op: 'bend', to: dir, radius: Math.ceil(this.width / 2) + 8, width: this.width, kind: this.chosenKind }];
+  }
+
   private addRun(dir: Dir): void {
     const rise = this.slope * this.length * SLOPE_RISE;
-    this.add([{ op: 'run', dir, len: this.length, width: this.width, kind: this.surface === 'plain' ? undefined : this.surface, rise }]);
+    this.add([...this.turningTo(dir), { op: 'run', dir, len: this.length, width: this.width, kind: this.chosenKind, rise }]);
   }
 
   // A piece that would land on the track already there, or make it too much to share, is refused.

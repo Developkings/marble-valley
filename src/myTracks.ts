@@ -43,7 +43,7 @@ export function plainCourse(track: CourseData): CourseData {
   return { version: 1, id: track.id, name: track.name, kind: track.kind, ops: track.ops };
 }
 
-const OPS = new Set(['backstop', 'run', 'drop', 'gap', 'loop', 'maze', 'rally', 'piston', 'laser', 'magnet', 'items', 'plate', 'spawn', 'box']);
+const OPS = new Set(['backstop', 'run', 'bend', 'wave', 'field', 'fork', 'drop', 'gap', 'loop', 'maze', 'rally', 'piston', 'laser', 'magnet', 'items', 'plate', 'spawn', 'box']);
 const DIRS = new Set(['N', 'E', 'S', 'W']);
 const KINDS = new Set(['plain', 'fast', 'boost', 'ramp', 'launch', 'land', 'maze', 'finish', 'crumble', 'ice', 'pad', 'wall']);
 
@@ -54,14 +54,14 @@ function fairOp(op: unknown): boolean {
       if (!Number.isFinite(value) || Math.abs(value) > MAX_NUMBER) return false;
     } else if (typeof value === 'string') {
       if (name === 'op' && !OPS.has(value)) return false;
-      if (name === 'dir' && !DIRS.has(value)) return false;
-      if (name === 'kind' && !KINDS.has(value)) return false;
+      if ((name === 'dir' || name === 'to') && !DIRS.has(value)) return false;
+      if ((name === 'kind' || name === 'floor') && !KINDS.has(value)) return false;
     } else if (Array.isArray(value)) {
       if (value.length > 300) return false;
       for (const item of value) {
-        if (typeof item === 'number' ? !Number.isFinite(item) : typeof item !== 'string' || item.length > 300 || !/^[#.]*$/.test(item)) return false;
+        if (typeof item === 'number' ? !Number.isFinite(item) : typeof item !== 'string' || item.length > 300 || !/^[#. 0-9A-Z]*$/.test(item)) return false;
       }
-    } else if (typeof value !== 'boolean') {
+    } else if (typeof value !== 'boolean' && value !== undefined) {
       return false;
     }
   }
@@ -78,6 +78,8 @@ export function isCourseData(data: unknown): data is CourseData {
   for (const op of d.ops) {
     if (op.op === 'run') cost += Math.abs(op.len) * Math.abs(op.width);
     if (op.op === 'plate') cost += Math.abs(op.w) * Math.abs(op.d);
+    if (op.op === 'wave' || op.op === 'field' || op.op === 'fork') cost += Math.abs(op.len) * Math.abs(op.width);
+    if (op.op === 'bend') cost += Math.abs(op.radius) * 2 * Math.abs(op.width);
   }
   if (cost > MAX_CELLS) return false;
   try {

@@ -1,4 +1,4 @@
-import type { CourseOp, Dir } from './course';
+import type { CourseOp, Dir, Kind } from './course';
 
 // Stretches of track to build courses from: the levels here, and the track creator.
 
@@ -88,7 +88,7 @@ export const rally = (offsets: number[], space = 10): CourseOp[] => [
   { op: 'run', dir: 'N', len: 12, width: 6 },
 ];
 
-const seeded = (start: number) => {
+export const seeded = (start: number) => {
   let seed = start;
   return (): number => {
     seed = (seed * 16807) % 2147483647;
@@ -96,48 +96,135 @@ const seeded = (start: number) => {
   };
 };
 
-// A maze with one way through, three blocks wide everywhere. Columns must be odd so the door sits in the middle.
-export function mazeRows(seed: number, cols: number, rows: number): string[] {
+export interface MazePlan {
+  rows: string[];
+  // The way through, as the middle of each room passed, from the door in to the door out, with row 0 at the far end.
+  way: { col: number; row: number }[];
+}
+
+export interface MazeShape {
+  corridor?: number; // blocks wide, odd so the doors can sit in the middle
+  wall?: number;
+  open?: boolean; // nothing between the corridors but a drop
+}
+
+// One way through and many dead ends. Of several tries it keeps the one with the longest way, and divides
+// the way into regions that each have a respawn point, so that a fall never sends the marble further on.
+export function mazePlan(seed: number, cols: number, rows: number, shape: MazeShape = {}): MazePlan {
+  const corridor = shape.corridor ?? 3;
+  const wall = shape.wall ?? 1;
+  const pitch = corridor + wall;
   const rand = seeded(seed * 7919 + 13);
-  const grid = Array.from({ length: rows * 4 + 1 }, () => new Array<string>(cols * 4 + 1).fill('#'));
-  const open = (cx: number, cy: number, fromX: number, fromY: number): void => {
-    for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) grid[cy * 4 + 1 + y][cx * 4 + 1 + x] = '.';
-    // The wall between two cells opens along the shared side.
-    if (fromX < cx) for (let y = 0; y < 3; y++) grid[cy * 4 + 1 + y][cx * 4] = '.';
-    if (fromX > cx) for (let y = 0; y < 3; y++) grid[cy * 4 + 1 + y][cx * 4 + 4] = '.';
-    if (fromY < cy) for (let x = 0; x < 3; x++) grid[cy * 4][cx * 4 + 1 + x] = '.';
-    if (fromY > cy) for (let x = 0; x < 3; x++) grid[cy * 4 + 4][cx * 4 + 1 + x] = '.';
-  };
-  const seen = new Set<number>();
-  const startX = (cols - 1) / 2;
-  const stack: [number, number][] = [[startX, rows - 1]];
-  seen.add((rows - 1) * cols + startX);
-  open(startX, rows - 1, startX, rows - 1);
-  while (stack.length > 0) {
-    const [x, y] = stack[stack.length - 1];
-    const next = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]].filter(
-      ([nx, ny]) => nx >= 0 && ny >= 0 && nx < cols && ny < rows && !seen.has(ny * cols + nx),
-    );
-    if (next.length === 0) {
-      stack.pop();
-      continue;
+  const startRoom = (rows - 1) * cols + (cols - 1) / 2;
+  const endRoom = (cols - 1) / 2;
+  let parents: Int32Array = new Int32Array(0);
+  let way: number[] = [];
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const parent = new Int32Array(cols * rows).fill(-1);
+    parent[startRoom] = startRoom;
+    const stack = [startRoom];
+    while (stack.length > 0) {
+      const room = stack[stack.length - 1];
+      const x = room % cols;
+      const y = Math.floor(room / cols);
+      const next: number[] = [];
+      if (x + 1 < cols && parent[room + 1] < 0) next.push(room + 1);
+      if (x > 0 && parent[room - 1] < 0) next.push(room - 1);
+      if (y + 1 < rows && parent[room + cols] < 0) next.push(room + cols);
+      if (y > 0 && parent[room - cols] < 0) next.push(room - cols);
+      if (next.length === 0) {
+        stack.pop();
+        continue;
+      }
+      const chosen = next[Math.floor(rand() * next.length)];
+      parent[chosen] = room;
+      stack.push(chosen);
     }
-    const [nx, ny] = next[Math.floor(rand() * next.length)];
-    seen.add(ny * cols + nx);
-    open(nx, ny, x, y);
-    stack.push([nx, ny]);
+    const path: number[] = [];
+    for (let at = endRoom; ; at = parent[at]) {
+      path.push(at);
+      if (at === startRoom) break;
+    }
+    if (path.length > way.length) {
+      way = path.reverse();
+      parents = parent;
+    }
   }
-  // Doors in the middle of the near and far walls.
-  const door = cols * 2;
-  for (let x = -1; x <= 1; x++) {
-    grid[0][door + x] = '.';
-    grid[rows * 4][door + x] = '.';
+
+  // Each room belongs to the stretch of the way its branch leaves from.
+  const stretches = Math.max(1, Math.min(9, Math.floor(way.length / 10)));
+  const region = new Int32Array(cols * rows).fill(-1);
+  way.forEach((room, i) => (region[room] = Math.floor((i * stretches) / way.length)));
+  const regionOf = (room: number): number => (region[room] >= 0 ? region[room] : (region[room] = regionOf(parents[room])));
+  const mark = (r: number): string => (r === 0 ? '.' : String(r));
+
+  const blank = shape.open ? ' ' : '#';
+  const grid = Array.from({ length: rows * pitch + wall }, () => new Array<string>(cols * pitch + wall).fill(blank));
+  const fill = (x: number, y: number, w: number, h: number, ch: string): void => {
+    for (let b = y; b < y + h; b++) for (let a = x; a < x + w; a++) grid[b][a] = ch;
+  };
+  for (let room = 0; room < cols * rows; room++) {
+    const x = room % cols;
+    const y = Math.floor(room / cols);
+    const ch = mark(regionOf(room));
+    fill(wall + x * pitch, wall + y * pitch, corridor, corridor, ch);
+    const up = parents[room];
+    if (up === room) continue;
+    const ux = up % cols;
+    const uy = Math.floor(up / cols);
+    if (ux !== x) fill(wall + Math.min(x, ux) * pitch + corridor, wall + y * pitch, wall, corridor, ch);
+    else fill(wall + x * pitch, wall + Math.min(y, uy) * pitch + corridor, corridor, wall, ch);
   }
-  return grid.map((row) => row.join(''));
+  const door = wall + ((cols - 1) / 2) * pitch;
+  fill(door, 0, corridor, wall, mark(stretches - 1));
+  fill(door, rows * pitch, corridor, wall, '.');
+  // A respawn point where each stretch begins.
+  const middle = (corridor - 1) / 2;
+  way.forEach((room, i) => {
+    const r = Math.floor((i * stretches) / way.length);
+    if (r === 0 || Math.floor(((i - 1) * stretches) / way.length) === r) return;
+    grid[wall + Math.floor(room / cols) * pitch + middle][wall + (room % cols) * pitch + middle] = String.fromCharCode(64 + r);
+  });
+  return {
+    rows: grid.map((row) => row.join('')),
+    way: way.map((room) => ({ col: wall + (room % cols) * pitch + middle, row: wall + Math.floor(room / cols) * pitch + middle })),
+  };
+}
+
+export const mazeRows = (seed: number, cols: number, rows: number, shape?: MazeShape): string[] => mazePlan(seed, cols, rows, shape).rows;
+
+export interface MazeOptions extends MazeShape {
+  floor?: Kind;
+  pistons?: number;
+  lasers?: number;
+}
+
+// A big maze with lanes to and from its doors, and with hazards standing in the way through it.
+export function bigMaze(seed: number, cols: number, rows: number, options: MazeOptions = {}): CourseOp[] {
+  const plan = mazePlan(seed, cols, rows, options);
+  const centre = Math.floor(plan.rows[0].length / 2);
+  const ops: CourseOp[] = [
+    { op: 'run', dir: 'N', len: 6, width: 6 },
+    { op: 'maze', rows: plan.rows, floor: options.floor, regions: true },
+  ];
+  const place = (spots: { col: number; row: number }[], count: number, make: (along: number, across: number, i: number) => CourseOp): void => {
+    for (let i = 0; i < count && spots.length > 0; i++) {
+      const at = spots[Math.floor(((i + 1) * spots.length) / (count + 1))];
+      ops.push(make(-(Math.floor(at.row) + 1), at.col - centre, i));
+    }
+  };
+  // Nothing comes down on a respawn point, and a laser only ever crosses a doorway on the way through,
+  // since along a corridor there would be no getting past it.
+  const rooms = plan.way.filter((at) => !/[A-Z]/.test(plan.rows[at.row][at.col]));
+  const doorways = plan.way.slice(1).flatMap((at, i) => (plan.way[i].col === at.col ? [{ col: at.col, row: (at.row + plan.way[i].row) / 2 }] : []));
+  place(rooms, options.pistons ?? 0, (along, across, i) => ({ op: 'piston', along, across, size: 3, period: 2.8 + (i % 3) * 0.3, phase: (i * 0.37) % 1 }));
+  place(doorways, options.lasers ?? 0, (along, across, i) => ({ op: 'laser', along, across, width: options.corridor ?? 3, period: 2.6 + (i % 3) * 0.4, phase: (i * 0.29) % 1 }));
+  ops.push({ op: 'run', dir: 'N', len: 8, width: 6 });
+  return ops;
 }
 
 export const maze = (seed: number, cols: number, rows: number, width = 6): CourseOp[] => [
   { op: 'run', dir: 'N', len: 6, width },
-  { op: 'maze', rows: mazeRows(seed, cols, rows) },
+  { op: 'maze', rows: mazeRows(seed, cols, rows), regions: true },
   { op: 'run', dir: 'N', len: 8, width },
 ];

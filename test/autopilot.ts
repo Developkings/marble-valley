@@ -15,10 +15,17 @@ const stillSensors = { steer: 0, pitch: 0, calibrate() {}, trackNeutral() {} } a
 
 const key = (ix: number, iz: number): string => `${ix},${iz}`;
 
+const floors = new WeakMap<Course, Map<string, Cell>>();
+
 // Shortest way over the floor, in blocks, or null when a gap or wall is in the way.
 export function wayTo(course: Course, from: Cell, target: Cell, midOnly = true): Cell[] | null {
-  const byKey = new Map<string, Cell>();
-  for (const c of course.list) if (Math.abs(c.ix - from.ix) < 120 && Math.abs(c.iz - from.iz) < 120) byKey.set(key(c.ix, c.iz), c);
+  let byKey = floors.get(course);
+  if (!byKey) {
+    byKey = new Map<string, Cell>();
+    for (const c of course.list) byKey.set(key(c.ix, c.iz), c);
+    floors.set(course, byKey);
+  }
+  const cells = byKey;
   const before = new Map<Cell, Cell | null>([[from, null]]);
   const queue = [from];
   for (let i = 0; i < queue.length; i++) {
@@ -33,7 +40,7 @@ export function wayTo(course: Course, from: Cell, target: Cell, midOnly = true):
       if (!n || n.kind === 'wall' || before.has(n)) continue;
       // Keeps a block's width from walls and edges, as a player would, where the way allows it.
       const open = (ox: number, oz: number): boolean => {
-        const o = byKey.get(key(n.ix + ox, n.iz + oz));
+        const o = cells.get(key(n.ix + ox, n.iz + oz));
         return !!o && o.kind !== 'wall';
       };
       if (midOnly && n !== target && !(open(1, 0) && open(-1, 0) && open(0, 1) && open(0, -1))) continue;
@@ -43,6 +50,21 @@ export function wayTo(course: Course, from: Cell, target: Cell, midOnly = true):
     }
   }
   return midOnly ? wayTo(course, from, target, false) : null;
+}
+
+// The block a section starts on: its point often lies on the line between it and the last one.
+function entrance(course: Course, point: { x: number; z: number }, section: number): Cell | undefined {
+  const at = course.cellAt(point.x, point.z);
+  if (at?.section === section) return at;
+  for (let ring = 1; ring <= 3; ring++) {
+    for (let ox = -ring; ox <= ring; ox++) {
+      for (let oz = -ring; oz <= ring; oz++) {
+        const c = course.cellAt(point.x + ox * CELL, point.z + oz * CELL);
+        if (c?.section === section && c.kind !== 'wall') return c;
+      }
+    }
+  }
+  return at;
 }
 
 // Plays a course from start to finish the way a good, patient player would, with keys rather than tilt.
@@ -63,6 +85,7 @@ export function drive(data: CourseData, limitSeconds = 1500): Drive {
   };
   game.begin();
   let path: Cell[] | null = null;
+  let further: Cell[] = [];
   let pathFrom: Cell | undefined;
   let pathTo: Cell | undefined;
   const dt = 1 / 60;
@@ -84,13 +107,18 @@ export function drive(data: CourseData, limitSeconds = 1500): Drive {
       const section = (game as unknown as { section: number }).section;
       const point = course.checkpoints[section + 1];
       const here = course.cellAt(b.x, b.z);
-      const toCell = point ? course.cellAt(point.x, point.z) : finishCell;
+      const toCell = point ? entrance(course, point, section + 1) : finishCell;
       let aimX = point ? point.x : (finishCell.ix + 0.5) * CELL;
       let aimZ = point ? point.z : (finishCell.iz + 0.5) * CELL;
       let slowFor = 90;
       if (here && toCell) {
         if (here !== pathFrom || toCell !== pathTo) {
           path = wayTo(course, here, toCell);
+          // Looks on past the next point, so as to have slowed down for what comes after it.
+          const nextPoint = course.checkpoints[section + 2];
+          const after = nextPoint && entrance(course, nextPoint, section + 2);
+          further = path ?? [];
+          if (path && after && path.length < 60) further = [...path, ...(wayTo(course, toCell, after)?.slice(1) ?? [])];
           pathFrom = here;
           pathTo = toCell;
         }
@@ -99,16 +127,39 @@ export function drive(data: CourseData, limitSeconds = 1500): Drive {
           aimX = (ahead.ix + 0.5) * CELL;
           aimZ = (ahead.iz + 0.5) * CELL;
           // Slowing ahead of a turn in the route.
-          const far = path[Math.min(path.length - 1, 8 + Math.floor(b.speed * 0.4))];
-          const straight = Math.abs(far.ix - here.ix) < 4 || Math.abs(far.iz - here.iz) < 4;
-          if (here.kind === 'maze') slowFor = 22;
-          else if (!straight) slowFor = 30;
+          const reach = Math.min(further.length - 1, 8 + Math.floor(b.speed * 0.4));
+          const far = further[reach];
+          const chord = Math.hypot(far.ix - here.ix, far.iz - here.iz) || 1;
+          let stray = 0;
+          for (let i = 1; i < reach; i++) {
+            const c = further[i];
+            stray = Math.max(stray, Math.abs((c.ix - here.ix) * (far.iz - here.iz) - (c.iz - here.iz) * (far.ix - here.ix)) / chord);
+          }
+          // As fast as the grip will take a curve of this size.
+          if (stray > 2) slowFor = Math.max(12, Math.sqrt(20 * CELL * ((chord * chord) / (8 * stray))));
+          if (here.kind === 'maze') slowFor = Math.min(slowFor, 22);
+          // Taking care wherever the floor is narrow.
+          for (let ox = -2; ox <= 2; ox++) {
+            for (let oz = -2; oz <= 2; oz++) {
+              if (!course.cellAt((here.ix + ox + 0.5) * CELL, (here.iz + oz + 0.5) * CELL)) slowFor = Math.min(slowFor, 24);
+            }
+          }
         }
-        if (here.kind === 'ice') slowFor = Math.min(slowFor, 30);
+        if (here.kind === 'ice') slowFor = Math.min(slowFor, 30) * 0.7;
       }
       const dx = aimX - b.x;
       const dz = aimZ - b.z;
       const d = Math.hypot(dx, dz) || 1;
+      // Waits for a laser ahead to go off, as anyone would.
+      for (const h of course.hazards) {
+        if (h.type !== 'laser') continue;
+        const gap = h.axis === 'x' ? h.z - b.z : h.x - b.x;
+        const side = h.axis === 'x' ? b.x - h.x : b.z - h.z;
+        const towards = h.axis === 'x' ? dz : dx;
+        if (Math.abs(side) > h.span / 2 + 1 || Math.abs(gap) < 1.6 || Math.abs(gap) > 14 || gap * towards < 0) continue;
+        if (Math.abs(gap) < 7 && game.world.laserState(h) !== 0) slowFor = 0;
+        else slowFor = Math.min(slowFor, 14);
+      }
       const ax = (dx / d) * slowFor - b.vx;
       const az = (dz / d) * slowFor - b.vz;
       x = Math.max(-1, Math.min(1, ax / 12)) || 0.001;

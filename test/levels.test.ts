@@ -15,8 +15,8 @@ describe('levels', () => {
   it('generates mazes with a door at each end', () => {
     const rows = mazeRows(3, 5, 4);
     const middle = (rows[0].length - 1) / 2;
-    expect(rows[0][middle]).toBe('.');
-    expect(rows[rows.length - 1][middle]).toBe('.');
+    expect(rows[0][middle]).not.toBe('#');
+    expect(rows[rows.length - 1][middle]).not.toBe('#');
   });
 
   const reference = drive(FIRST_COURSE);
@@ -26,7 +26,7 @@ describe('levels', () => {
   });
 
   for (const level of LEVELS) {
-    it(`${level.name} never runs over itself and can be finished, in about five times the first course`, () => {
+    it(`${level.name} never runs over itself and can be finished`, () => {
       const course = new Course(level);
       const run = drive(level);
       console.log(`${level.id.padEnd(9)} ${level.name.padEnd(15)} ${level.style.padEnd(6)} cells ${String(course.list.length).padStart(6)}  time ${run.time.toFixed(0).padStart(5)}  x${(run.time / reference.time).toFixed(1)}  falls ${run.falls} ${run.finished ? '' : `STUCK section ${run.section}/${course.checkpoints.length}`}`);
@@ -34,6 +34,35 @@ describe('levels', () => {
       expect(run.finished).toBe(true);
     }, 120000);
   }
+
+  for (const level of LEVELS) {
+    it(`${level.name} doesn't keep repeating itself`, () => {
+      const plan = level.plan.filter((name) => name !== 'clearing');
+      const runs = plan.slice(2).map((name, i) => `${plan[i]}>${plan[i + 1]}>${name}`);
+      expect(new Set(runs).size).toBe(runs.length);
+      const counts = new Map<string, number>();
+      for (const name of plan) counts.set(name, (counts.get(name) ?? 0) + 1);
+      if (plan.length > 12) expect(Math.max(...counts.values()) / plan.length).toBeLessThan(0.25);
+      if (level.style !== 'Maze') expect(counts.size).toBeGreaterThanOrEqual(6);
+    });
+
+    it(`${level.name} goes round its corners rather than turning square`, () => {
+      let dir = 'N';
+      for (const op of level.ops) {
+        if (op.op === 'bend') dir = op.to;
+        else if (op.op === 'run') expect(op.dir).toBe(dir);
+      }
+    });
+  }
+
+  it('has mazes much too big to see across', () => {
+    for (const level of LEVELS.filter((l) => l.style === 'Maze')) {
+      const mazes = level.ops.filter((op) => op.op === 'maze');
+      expect(mazes.length).toBeGreaterThanOrEqual(2);
+      const biggest = Math.max(...mazes.map((op) => (op.op === 'maze' ? op.rows.length * op.rows[0].length : 0)));
+      expect(biggest).toBeGreaterThanOrEqual(45 * 45);
+    }
+  });
 
   for (const track of RACE_TRACKS) {
     it(`circuit ${track.name} joins up with itself`, () => {

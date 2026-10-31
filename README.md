@@ -4,7 +4,7 @@ A marble game played by tilting your phone: time attack courses, races and battl
 
 ## What's in it
 
-- **21 courses.** First Valley, then 20 levels: 5 each of Speed, Maze, Skill and a Mix. Each level is sized to take a regular player about five minutes.
+- **21 courses.** First Valley, then 20 levels: 5 each of Speed, Maze, Skill and a Mix. Roads wind, fork and climb, no two stretches run the same way, and the mazes are many screens across.
 - **11 race tracks.** Closed circuits with laps and weapons.
 - **Battle mode, in 4 arenas with platforms at different heights.** Everyone starts with 3 hearts, shown at the top of the screen. A fall, a Seeker or a Mine costs one, and the last one rolling wins.
 - **Track creator.** Lay a track piece by piece, test it, save it, and race it with friends: the room sends it to everyone.
@@ -60,7 +60,7 @@ The Android project in the repository is set up to load the game from this dev s
 
 ## Making courses
 
-Levels are lists of pieces in `src/levels.ts`, built from `src/pieces.ts`. `test/autopilot.ts` drives every level from start to finish with the game's real physics, to prove each can be finished and to measure its length against the first course. Tracks are in `src/tracks.ts`, arenas in `src/arenas.ts`, and themes are plain data in `src/themes.ts`.
+Levels in `src/levels.ts` say which pieces each act may draw on and for how long; a seeded composer lays them one at a time, refusing a piece that would run over the road or repeat a recent sequence, so a level comes out the same every time without being a loop. `test/autopilot.ts` drives every level from start to finish with the game's real physics, to prove each can be finished and to measure its length against the first course. Tracks are in `src/tracks.ts`, arenas in `src/arenas.ts`, and themes are plain data in `src/themes.ts`.
 
 ## Music
 

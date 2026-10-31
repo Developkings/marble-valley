@@ -71,7 +71,10 @@ const DIST_FAST = 122;
 const SPEED_FOR_FAST = 95;
 const LOOK_AHEAD_SECONDS = 0.32;
 const RACE_LOOK_AHEAD_SECONDS = 0.42; // circuits turn back on themselves, so the road ahead can be any way
-const BALL_LOW_ON_SCREEN = 0.17; // fraction of camera distance the view centre sits above the ball
+const BALL_LOW_ON_SCREEN = 0.17; // fraction of camera distance the view centre sits ahead of the ball
+const LEAD_TURN_RATE = 1.6; // how quickly the view swings round to a new way of going
+const LEAD_MIN_SPEED = 4;
+const LEAD_SIDEWAYS_LIMIT = 0.5; // of the half width of the screen, so a fast marble never leaves it
 const STREAK_FROM_SPEED = 26;
 
 interface Point3 {
@@ -232,6 +235,9 @@ export class View {
     addEventListener('resize', () => this.resize());
     this.resize();
   }
+
+  private leadX = 0;
+  private leadZ = -1;
 
   resetCamera(): void {
     this.snap = true;
@@ -826,10 +832,21 @@ export class View {
     // Keep the marble low on screen with the road ahead of it above.
     // In a loop it comes back on itself, and looking ahead would throw the view back and forth.
     const ahead = g.state === 'loop' ? 0 : g.race ? RACE_LOOK_AHEAD_SECONDS : LOOK_AHEAD_SECONDS;
+    // The road ahead gets the room on screen, whichever way it goes.
+    if (this.snap) {
+      this.leadX = 0;
+      this.leadZ = -1;
+    } else if (speed > LEAD_MIN_SPEED && g.state !== 'loop') {
+      const turn = 1 - Math.exp(-dt * LEAD_TURN_RATE);
+      this.leadX += (b.vx / speed - this.leadX) * turn;
+      this.leadZ += (b.vz / speed - this.leadZ) * turn;
+    }
+    const wide = Math.tan((fov * Math.PI) / 360) * this.dist * this.camera.aspect * LEAD_SIDEWAYS_LIMIT;
+    const room = g.race ? 0 : this.dist * BALL_LOW_ON_SCREEN;
     this.wantTarget.set(
-      b.x + b.vx * ahead,
+      b.x + Math.max(-wide, Math.min(wide, b.vx * ahead + this.leadX * room)),
       g.state === 'loop' ? g.groundY : b.y,
-      b.z + b.vz * ahead - (g.race ? 0 : this.dist * BALL_LOW_ON_SCREEN),
+      b.z + b.vz * ahead + this.leadZ * room,
     );
     const follow = this.snap ? 1 : 1 - Math.exp(-dt * 6);
     this.target.lerp(this.wantTarget, follow);
