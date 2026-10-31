@@ -1,0 +1,9 @@
+{
+  "appId": "com.marblevalley.game",
+  "appName": "Marble Valley",
+  "webDir": "dist",
+  "server": {
+    "url": "http://localhost:5173",
+    "cleartext": true
+  }
+}

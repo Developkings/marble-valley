@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <title>Marble Valley</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #f3d9c9; touch-action: none; user-select: none; -webkit-user-select: none; }
+      body { font-family: Georgia, 'Times New Roman', serif; color: #4a3b52; }
+      canvas { position: fixed; inset: 0; display: block; }
+      .hud { position: fixed; left: 0; right: 0; top: 0; padding: max(16px, env(safe-area-inset-top)) 20px 0; display: flex; justify-content: space-between; align-items: baseline; pointer-events: none; font-variant-numeric: tabular-nums; }
+      .hud[hidden] { display: none; }
+      #time { font-size: 30px; letter-spacing: 1px; }
+      #speed { font-size: 16px; opacity: 0.75; }
+      #meter { width: 96px; height: 10px; border: 1px solid #4a3b52; background: rgba(255, 248, 240, 0.6); align-self: center; }
+      #meterFill { height: 100%; background: #39c6ff; transform: scaleX(0); transform-origin: left; }
+      #callout { position: fixed; left: 0; right: 0; top: 24%; text-align: center; font-size: 30px; letter-spacing: 2px; pointer-events: none; transition: color 0.2s; }
+      .panel { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 24px; }
+      .panel[hidden] { display: none; }
+      h1 { font-weight: normal; font-size: 40px; letter-spacing: 3px; margin: 0 0 4px; }
+      p { margin: 0; line-height: 1.45; max-width: 320px; }
+      button { font: inherit; color: inherit; background: #fff8f0; border: 1px solid #4a3b52; padding: 12px 32px; min-width: 180px; font-size: 18px; letter-spacing: 1px; }
+      button:active { background: #e8a48f; }
+      #labValue { font-size: 72px; font-variant-numeric: tabular-nums; line-height: 1; }
+      #labLog, #labLive { font-family: monospace; font-size: 13px; white-space: pre; text-align: left; }
+      #lab { background: #f3d9c9; }
+      .controls { position: fixed; left: 0; right: 0; bottom: 0; padding: 0 16px max(16px, env(safe-area-inset-bottom)); display: flex; justify-content: space-between; pointer-events: none; }
+      .controls[hidden] { display: none; }
+      .controls button { pointer-events: auto; min-width: 0; padding: 10px 16px; font-size: 15px; background: rgba(255, 248, 240, 0.75); }
+    </style>
+  </head>
+  <body>
+    <div class="hud" id="hud" hidden>
+      <div id="time">0.00</div>
+      <div id="meter"><div id="meterFill"></div></div>
+      <div id="speed">0</div>
+    </div>
+    <div class="controls" id="controls" hidden>
+      <button id="restart">Restart</button>
+      <button id="toMenu">Menu</button>
+    </div>
+    <div id="callout"></div>
+
+    <div class="panel" id="menu">
+      <h1>Marble Valley</h1>
+      <p id="menuText">Hold the phone comfortably. During the countdown, that angle becomes neutral.</p>
+      <button id="play">Play</button>
+      <button id="openLab">Sensor Lab</button>
+    </div>
+
+    <div class="panel" id="lab" hidden>
+      <p>Hold the phone still, then move it in any direction and stop.</p>
+      <div id="labValue">--</div>
+      <div id="labLive"></div>
+      <div id="labLog"></div>
+      <button id="closeLab">Back</button>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
