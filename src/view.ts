@@ -1,7 +1,11 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { BallExtras } from './ballExtras';
 import { CELL, DIR_VEC, loopPoint, type Cell, type Course, type Laser, type Loop, type Magnet, type Piston } from './course';
 import type { Game } from './game';
-import { JOY_BALL, VALLEY, type BallTheme, type WorldTheme } from './themes';
+import { makeBlockPattern, makeCrumblePattern, makeWindows, PATTERN_CELLS } from './patterns';
+import { RaceView } from './raceView';
+import type { BallTheme, WorldTheme } from './themes';
 
 const BALL_RADIUS = 1.05;
 const BALL_MAX_GROWTH = 2; // extra size, as a multiple, at great height
@@ -10,6 +14,10 @@ const SHADOW_DRIFT = 0.3; // the sun is off to one side: the higher the marble, 
 const LOOP_SEGMENTS = 36;
 const LOOP_RAIL_THICK = 0.5;
 const LOOP_TIE_EVERY = 4;
+const TRAIL_COUNT = 12;
+const TRAIL_EVERY_SECONDS = 0.035;
+const TRAIL_FROM_SPEED = 12;
+const NEON_RATE = 0.0025;
 const CLIFF_DEPTH = 14;
 const CRUMBLE_DEPTH = 3;
 const CRUMBLE_DROP = 22;
@@ -25,6 +33,21 @@ const EMITTER_WIDTH = 1.8;
 const EMITTER_HEIGHT = 3.2;
 const LASER_GUIDE_WIDTH = 0.5;
 const LENS_SIZES = [0.5, 1, 1.5]; // off, charging, firing
+const PISTON_SEE_THROUGH = 0.35; // raised, so the marble can be seen beneath it
+const PISTON_SOLID_BELOW = 3; // solid to look at from the height it is solid to touch
+const PISTON_FADE = 7;
+
+// Inclination is read from light alone: slopes facing the sun are bright, slopes facing away fall into shade.
+const FLAT_SHADE = 0.9;
+const SLOPE_SHADE = 3.2;
+const SLOPE_DARKEST = 0.72;
+const SLOPE_BRIGHTEST = 1.2;
+const STRIPE_SHADE = 0.9; // speed zones: a beat for the eye to count, in shade rather than colour
+const MAZE_SHADE = 0.86;
+const CRUMBLE_SHADE = 0.82;
+const ICE_SHADE = 1.2;
+const CHUNK_CELLS = 24; // blocks are drawn in squares this wide, so only what is in view costs anything
+const FINISH_DARK = 0.25;
 
 // Three layers at different depths, moving at different speeds on screen, as in Sonic:
 // foreground slabs rush past near the lens, the course is the middle, towers drift below.
@@ -47,6 +70,7 @@ const DIST_SLOW = 100;
 const DIST_FAST = 122;
 const SPEED_FOR_FAST = 95;
 const LOOK_AHEAD_SECONDS = 0.32;
+const RACE_LOOK_AHEAD_SECONDS = 0.42; // circuits turn back on themselves, so the road ahead can be any way
 const BALL_LOW_ON_SCREEN = 0.17; // fraction of camera distance the view centre sits above the ball
 const STREAK_FROM_SPEED = 26;
 
@@ -68,14 +92,27 @@ export class View {
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(FOV_SLOW, 1, 5, 800);
   private ball: THREE.Mesh;
+  private matcap: THREE.Texture;
+  private raceView: RaceView | null = null;
+  private ballMaterial: THREE.MeshMatcapMaterial;
+  private extras: BallExtras;
+  private trail: THREE.InstancedMesh | null = null;
+  private trailSpots: THREE.Vector3[] = [];
+  private trailNext = 0;
+  private trailWait = 0;
+  private neonA = new THREE.Color();
+  private neonB = new THREE.Color();
   private shadow: THREE.Mesh;
+  private blockMap: THREE.Texture;
+  private crumbleMap: THREE.Texture;
+  private track = new THREE.Group(); // everything that belongs to the current course
   private streaks: THREE.InstancedMesh;
   private streakOffsets: THREE.Vector3[] = [];
   private front: THREE.InstancedMesh;
   private frontMaterial = new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0, depthWrite: false });
   private frontItems: Drifter[] = [];
   private back: THREE.InstancedMesh;
-  private backMaterial = new THREE.MeshLambertMaterial({ flatShading: true });
+  private backMaterials: THREE.MeshLambertMaterial[] = [];
   private backItems: Drifter[] = [];
   private chevronMaterial = new THREE.MeshBasicMaterial({ color: '#ffffff', side: THREE.DoubleSide });
   private rings: THREE.InstancedMesh | null = null;
@@ -83,7 +120,8 @@ export class View {
   private orbs: THREE.InstancedMesh | null = null;
   private crumbles: THREE.InstancedMesh | null = null;
   private crumbleCells: Cell[] = [];
-  private pistons: THREE.InstancedMesh | null = null;
+  private crumblesAtRest = false;
+  private pistons: THREE.Mesh<THREE.BoxGeometry, THREE.MeshLambertMaterial>[] = [];
   private pistonShadows: THREE.InstancedMesh | null = null;
   private pistonItems: Piston[] = [];
   private lasers: THREE.InstancedMesh | null = null;
@@ -119,16 +157,19 @@ export class View {
 
   constructor(
     private game: Game,
-    private theme: WorldTheme = VALLEY,
-    ballTheme: BallTheme = JOY_BALL,
+    private theme: WorldTheme,
   ) {
+    const ballTheme = theme.ball;
+    this.blockMap = makeBlockPattern(theme.pattern);
+    this.crumbleMap = makeCrumblePattern(theme.pattern);
+    this.frontMaterial.color.set(theme.front);
     this.sky = new THREE.Color(theme.sky);
     this.jumpSpace = new THREE.Color(theme.jumpSpace);
     this.backInSpace = new THREE.Color(theme.backInJumpSpace);
     this.bg = this.sky.clone();
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    this.renderer = new THREE.WebGLRenderer({ antialias: !theme.pixelWidth, powerPreference: 'high-performance' });
+    if (theme.pixelWidth) this.renderer.domElement.style.imageRendering = 'pixelated';
     document.body.prepend(this.renderer.domElement);
     this.scene.background = this.bg;
     // Looking almost straight down, screen up must stay along the course or side tilt rolls the picture.
@@ -141,17 +182,11 @@ export class View {
 
     this.laserMaterial = new THREE.MeshBasicMaterial({ color: theme.laser, transparent: true, depthWrite: false });
 
-    const course = game.course;
-    this.buildBlocks(course);
-    this.buildCrumbles(course);
-    this.buildChevrons(course);
-    this.buildRings(course);
-    this.buildOrbs(course);
-    this.buildHazards(course);
-    this.buildLoops(course);
+    this.scene.add(this.track);
+    this.buildCourse();
 
     const box = new THREE.BoxGeometry(1, 1, 1);
-    this.back = new THREE.InstancedMesh(box, this.backMaterial, BACK_COUNT);
+    this.back = this.buildBackLayer();
     this.back.frustumCulled = false;
     this.front = new THREE.InstancedMesh(box, this.frontMaterial, FRONT_COUNT);
     this.front.frustumCulled = false;
@@ -159,21 +194,27 @@ export class View {
     this.scene.add(this.back, this.front);
     this.seedLayers();
 
-    this.ball = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(BALL_RADIUS, 1),
-      new THREE.MeshMatcapMaterial({ matcap: makeMatcap(ballTheme), flatShading: true }),
-    );
+    this.matcap = makeMatcap(ballTheme);
+    this.ballMaterial = new THREE.MeshMatcapMaterial({ matcap: this.matcap, flatShading: true });
+    this.ball = new THREE.Mesh(new THREE.IcosahedronGeometry(BALL_RADIUS, 1), this.ballMaterial);
     this.scene.add(this.ball);
+    this.extras = new BallExtras(ballTheme.extra);
+    this.scene.add(this.extras.group);
+    if (ballTheme.neon) {
+      this.neonA.set(ballTheme.neon[0]);
+      this.neonB.set(ballTheme.neon[1]);
+    }
+    if (ballTheme.trail) this.buildTrail(ballTheme.trail);
 
     this.shadow = new THREE.Mesh(
       new THREE.CircleGeometry(BALL_RADIUS, 12).rotateX(-Math.PI / 2),
-      new THREE.MeshBasicMaterial({ color: '#4a3b52', transparent: true, opacity: 0.3, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: theme.shadow, transparent: true, opacity: 0.3, depthWrite: false }),
     );
     this.scene.add(this.shadow);
 
     this.streaks = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.16, 0.05, 1),
-      new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.55, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: theme.streak, transparent: true, opacity: 0.55, depthWrite: false }),
       STREAKS,
     );
     this.streaks.frustumCulled = false;
@@ -196,15 +237,61 @@ export class View {
     this.snap = true;
   }
 
+  // Draws the race the game has just started, or stops drawing one if there is none now.
+  showRace(): void {
+    this.raceView?.dispose();
+    const race = this.game.race;
+    const t = this.theme;
+    this.raceView = race ? new RaceView(this.scene, race, this.game.world, this.ball, this.matcap, t.accent, t.wall, t.shadow) : null;
+  }
+
+  private buildCourse(): void {
+    const course = this.game.course;
+    this.buildBlocks(course);
+    this.buildCrumbles(course);
+    this.buildChevrons(course);
+    this.buildRings(course);
+    this.buildOrbs(course);
+    this.buildHazards(course);
+    this.buildLoops(course);
+  }
+
+  // The game has moved to another course: everything drawn for the last one goes.
+  rebuildCourse(): void {
+    this.track.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      o.geometry.dispose();
+      (o.material as THREE.Material).dispose();
+      if (o instanceof THREE.InstancedMesh) o.dispose();
+    });
+    this.track.clear();
+    this.rings = null;
+    this.ringBase = [];
+    this.orbs = null;
+    this.crumbles = null;
+    this.crumbleCells = [];
+    this.crumblesAtRest = false;
+    this.pistons = [];
+    this.pistonShadows = null;
+    this.pistonItems = [];
+    this.lasers = null;
+    this.laserItems = [];
+    this.laserLenses = null;
+    this.magnets = null;
+    this.magnetItems = [];
+    this.buildCourse();
+    this.snap = true;
+  }
+
   private tintedBox(): THREE.BoxGeometry {
     const box = new THREE.BoxGeometry(1, 1, 1);
     const positions = box.getAttribute('position');
     const colors = new Float32Array(positions.count * 3);
     for (let i = 0; i < positions.count; i++) {
       const top = positions.getY(i) > 0;
-      colors[i * 3] = top ? 1 : 0.86;
-      colors[i * 3 + 1] = top ? 1 : 0.68;
-      colors[i * 3 + 2] = top ? 1 : 0.72;
+      colors[i * 3] = top ? 1 : this.theme.sideTint[0];
+      colors[i * 3 + 1] = top ? 1 : this.theme.sideTint[1];
+      colors[i * 3 + 2] = top ? 1 : this.theme.sideTint[2];
     }
     box.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     return box;
@@ -212,27 +299,61 @@ export class View {
 
   // One box per grid cell in a single draw call. Sloped cells are the same box, sheared.
   private buildBlocks(course: Course): void {
-    const solid = course.list.filter((c) => c.kind !== 'crumble');
-    const blocks = new THREE.InstancedMesh(
-      this.tintedBox(),
-      new THREE.MeshLambertMaterial({ flatShading: true, vertexColors: true }),
-      solid.length,
-    );
+    const chunks = new Map<string, Cell[]>();
+    for (const c of course.list) {
+      if (c.kind === 'crumble') continue;
+      const id = `${Math.floor(c.ix / CHUNK_CELLS)}:${Math.floor(c.iz / CHUNK_CELLS)}`;
+      const chunk = chunks.get(id);
+      if (chunk) chunk.push(c);
+      else chunks.set(id, [c]);
+    }
+    const shape = this.tintedBox();
+    const material = worldMapped(new THREE.MeshLambertMaterial({ flatShading: true, vertexColors: true, map: this.blockMap }));
     const size = CELL + 0.01;
-    solid.forEach((c, i) => {
-      const cx = (c.ix + 0.5) * CELL;
-      const cz = (c.iz + 0.5) * CELL;
-      const top = c.h + (c.sx + c.sz) * (CELL / 2);
-      this.m.set(
-        size, 0, 0, cx,
-        c.sx * size, CLIFF_DEPTH, c.sz * size, top - CLIFF_DEPTH / 2,
-        0, 0, size, cz,
-        0, 0, 0, 1,
-      );
-      blocks.setMatrixAt(i, this.m);
-      blocks.setColorAt(i, this.color.set(this.theme.tones[c.kind][toneIndex(c)]));
-    });
-    this.scene.add(blocks);
+    for (const cells of chunks.values()) {
+      const blocks = new THREE.InstancedMesh(shape, material, cells.length);
+      cells.forEach((c, i) => {
+        const cx = (c.ix + 0.5) * CELL;
+        const cz = (c.iz + 0.5) * CELL;
+        const top = c.h + (c.sx + c.sz) * (CELL / 2);
+        this.m.set(
+          size, 0, 0, cx,
+          c.sx * size, CLIFF_DEPTH, c.sz * size, top - CLIFF_DEPTH / 2,
+          0, 0, size, cz,
+          0, 0, 0, 1,
+        );
+        blocks.setMatrixAt(i, this.m);
+        this.tone(c);
+        blocks.setColorAt(i, this.color);
+      });
+      this.track.add(blocks);
+    }
+  }
+
+  // A cell's colour is the theme's, in the light its slope catches.
+  private tone(c: Cell): void {
+    const t = this.theme;
+    const signal = c.kind === 'boost' || c.kind === 'launch' || c.kind === 'pad';
+    this.color.set(c.kind === 'wall' ? t.wall : signal ? t.accent : t.floor);
+    let shade = FLAT_SHADE;
+    if (c.kind === 'fast') {
+      const along = c.dir === 'N' || c.dir === 'S' ? c.iz : c.ix;
+      if (Math.abs(Math.floor(along / 2)) % 2) shade *= STRIPE_SHADE;
+    } else if (c.kind === 'maze') {
+      shade *= MAZE_SHADE;
+    } else if (c.kind === 'crumble') {
+      shade *= CRUMBLE_SHADE;
+    } else if (c.kind === 'ice') {
+      shade *= ICE_SHADE;
+    } else if (c.kind === 'finish' && Math.abs(c.ix + c.iz) % 2) {
+      shade *= FINISH_DARK;
+    }
+    if (c.sx !== 0 || c.sz !== 0) {
+      // Facing the same sun the scene is lit by.
+      const facing = 1 + SLOPE_SHADE * (0.5 * c.sx - 0.65 * c.sz);
+      shade *= Math.max(SLOPE_DARKEST, Math.min(SLOPE_BRIGHTEST, facing));
+    }
+    this.color.multiplyScalar(shade);
   }
 
   // Kept apart from the other blocks so only these few are re-uploaded while they fall.
@@ -241,20 +362,25 @@ export class View {
     if (this.crumbleCells.length === 0) return;
     this.crumbles = new THREE.InstancedMesh(
       this.tintedBox(),
-      new THREE.MeshLambertMaterial({ flatShading: true, vertexColors: true }),
+      worldMapped(new THREE.MeshLambertMaterial({ flatShading: true, vertexColors: true, map: this.crumbleMap })),
       this.crumbleCells.length,
     );
     this.crumbles.frustumCulled = false;
     this.crumbleCells.forEach((c, i) => {
-      this.crumbles!.setColorAt(i, this.color.set(this.theme.tones.crumble[toneIndex(c)]));
+      this.tone(c);
+      this.crumbles!.setColorAt(i, this.color);
     });
-    this.scene.add(this.crumbles);
+    this.track.add(this.crumbles);
   }
 
   private updateCrumbles(): void {
     const mesh = this.crumbles;
     if (!mesh) return;
     const world = this.game.world;
+    // Long crumbling stretches only cost anything while one of them is actually going.
+    const busy = this.crumbleCells.some((c) => world.crumbleState(c) > 0);
+    if (!busy && this.crumblesAtRest) return;
+    this.crumblesAtRest = !busy;
     const time = performance.now() * 0.05;
     this.sc.set(CELL + 0.01, CRUMBLE_DEPTH, CELL + 0.01);
     this.crumbleCells.forEach((c, i) => {
@@ -268,6 +394,65 @@ export class View {
     mesh.instanceMatrix.needsUpdate = true;
   }
 
+  // The deep layer's shape: plain towers, lit buildings, castle towers, or rounded hills and clouds.
+  private buildBackLayer(): THREE.InstancedMesh {
+    const material = (map: THREE.Texture | null = null): THREE.MeshLambertMaterial => {
+      const m = new THREE.MeshLambertMaterial({ flatShading: true, map });
+      this.backMaterials.push(m);
+      return m;
+    };
+    const shape = this.theme.backShape;
+    if (shape === 'building') {
+      const walls = material(makeWindows());
+      const roof = material();
+      return new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), [walls, walls, roof, roof, walls, walls], BACK_COUNT);
+    }
+    if (shape === 'castle') {
+      // Square keeps with battlements, which read as castles from straight above.
+      const parts: THREE.BufferGeometry[] = [new THREE.BoxGeometry(1, 0.94, 1).translate(0, -0.03, 0)];
+      for (const x of [-0.38, 0, 0.38]) {
+        for (const z of [-0.38, 0, 0.38]) {
+          if (x !== 0 || z !== 0) parts.push(new THREE.BoxGeometry(0.2, 0.06, 0.2).translate(x, 0.47, z));
+        }
+      }
+      return new THREE.InstancedMesh(mergeGeometries(parts)!, material(), BACK_COUNT);
+    }
+    if (shape === 'round') return new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.5, 1), material(), BACK_COUNT);
+    return new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material(), BACK_COUNT);
+  }
+
+  private buildTrail(color: string): void {
+    this.trail = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.75, depthWrite: false }),
+      TRAIL_COUNT,
+    );
+    this.trail.frustumCulled = false;
+    for (let i = 0; i < TRAIL_COUNT; i++) this.trailSpots.push(new THREE.Vector3());
+    this.scene.add(this.trail);
+  }
+
+  // Squares left behind the marble, shrinking as they age.
+  private updateTrail(dt: number, speed: number): void {
+    const mesh = this.trail;
+    if (!mesh) return;
+    this.trailWait -= dt;
+    const fresh = speed > TRAIL_FROM_SPEED;
+    if (this.trailWait <= 0) {
+      this.trailWait = TRAIL_EVERY_SECONDS;
+      this.trailSpots[this.trailNext].copy(this.ball.position);
+      // Standing still, the marble covers the newest squares and the older ones run out.
+      this.trailNext = (this.trailNext + 1) % TRAIL_COUNT;
+    }
+    for (let i = 0; i < TRAIL_COUNT; i++) {
+      const age = (this.trailNext - 1 - i + TRAIL_COUNT * 2) % TRAIL_COUNT;
+      const size = fresh ? (1 - age / TRAIL_COUNT) * BALL_RADIUS * 1.1 : 0;
+      this.sc.setScalar(size);
+      mesh.setMatrixAt(i, this.m.compose(this.trailSpots[i], this.identity, this.sc));
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+
   private seedLayers(): void {
     let seed = 7;
     const rand = (): number => {
@@ -278,11 +463,12 @@ export class View {
     for (let i = 0; i < BACK_COUNT; i++) {
       const wide = 4 + rand() * 7;
       const tall = 18 + rand() * 30;
+      const round = this.theme.backShape === 'round';
       this.backItems.push({
         x: rand() * BACK_SPAN,
         y: -55 - rand() * 80 - tall / 2,
         z: rand() * BACK_SPAN,
-        scale: new THREE.Vector3(wide, tall, wide),
+        scale: round ? new THREE.Vector3(wide * 2.2, tall * 0.5, wide * 2.2) : new THREE.Vector3(wide, tall, wide),
       });
       this.back.setColorAt(i, this.color.set(tones[i % tones.length]));
     }
@@ -300,7 +486,7 @@ export class View {
     const rows = new Map<string, Cell[]>();
     for (const c of course.list) {
       if ((c.kind !== 'boost' && c.kind !== 'launch') || !c.dir) continue;
-      const id = `${c.section}:${c.dir === 'N' ? c.iz : c.ix}`;
+      const id = `${c.section}:${c.dir === 'N' || c.dir === 'S' ? c.iz : c.ix}`;
       if (!rows.has(id)) rows.set(id, []);
       rows.get(id)!.push(c);
     }
@@ -324,11 +510,11 @@ export class View {
       const z = row.reduce((sum, r) => sum + (r.iz + 0.5) * CELL, 0) / row.length;
       // Flat on the middle of the block, lifted clear on a launch ramp's slope.
       dummy.position.set(x, c.h + (c.sx + c.sz) * (CELL / 2) + (c.kind === 'launch' ? 0.45 : 0.06), z);
-      dummy.rotation.set(0, c.dir === 'W' ? Math.PI / 2 : c.dir === 'E' ? -Math.PI / 2 : 0, 0);
+      dummy.rotation.set(0, c.dir === 'W' ? Math.PI / 2 : c.dir === 'E' ? -Math.PI / 2 : c.dir === 'S' ? Math.PI : 0, 0);
       dummy.updateMatrix();
       chevrons.setMatrixAt(i++, dummy.matrix);
     }
-    this.scene.add(chevrons);
+    this.track.add(chevrons);
   }
 
   // Rings along each hop's arc, spinning while Jump-Space is open.
@@ -354,13 +540,12 @@ export class View {
         dummy.updateMatrix();
         this.ringBase.push(dummy.matrix.clone());
         rings.setMatrixAt(i, dummy.matrix);
-        rings.setColorAt(i, this.color.setHSL(0.52 + i * 0.03, 0.9, 0.7));
         i++;
       }
     }
     rings.visible = false;
     this.rings = rings;
-    this.scene.add(rings);
+    this.track.add(rings);
   }
 
   // Two rails and a few ties, not a solid road: from above, a floor overhead would hide the marble.
@@ -369,7 +554,7 @@ export class View {
     const ties = Math.ceil(LOOP_SEGMENTS / LOOP_TIE_EVERY);
     const parts = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshLambertMaterial({ color: this.theme.loop, flatShading: true }),
+      new THREE.MeshLambertMaterial({ color: this.theme.wall, flatShading: true }),
       course.loops.length * (LOOP_SEGMENTS * 2 + ties),
     );
     parts.frustumCulled = false;
@@ -386,7 +571,7 @@ export class View {
         i = this.placeLoopSegment(parts, i, l, from, to, side, s);
       }
     }
-    this.scene.add(parts);
+    this.track.add(parts);
   }
 
   private placeLoopSegment(parts: THREE.InstancedMesh, start: number, l: Loop, from: Point3, to: Point3, side: THREE.Vector3, s: number): number {
@@ -416,11 +601,11 @@ export class View {
     if (course.orbs.length === 0) return;
     this.orbs = new THREE.InstancedMesh(
       new THREE.OctahedronGeometry(ORB_RADIUS, 0),
-      new THREE.MeshBasicMaterial({ color: this.theme.orb }),
+      new THREE.MeshBasicMaterial({ color: this.theme.accent }),
       course.orbs.length,
     );
     this.orbs.frustumCulled = false;
-    this.scene.add(this.orbs);
+    this.track.add(this.orbs);
   }
 
   private updateOrbs(): void {
@@ -444,35 +629,39 @@ export class View {
     this.magnetItems = course.hazards.filter((h): h is Magnet => h.type === 'magnet');
 
     if (this.pistonItems.length > 0) {
-      this.pistons = new THREE.InstancedMesh(
-        new THREE.BoxGeometry(1, 1, 1),
-        new THREE.MeshLambertMaterial({ color: this.theme.piston, transparent: true, opacity: 0.7, flatShading: true }),
-        this.pistonItems.length,
-      );
-      this.pistons.frustumCulled = false;
-      this.pistons.renderOrder = 1;
+      // Each its own material: one may be solid while another is still raised and see-through.
+      this.pistons = this.pistonItems.map(() => {
+        const mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 1, 1),
+          worldMapped(new THREE.MeshLambertMaterial({ color: this.theme.wall, map: this.blockMap, transparent: true, flatShading: true }), false),
+        );
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 1;
+        this.track.add(mesh);
+        return mesh;
+      });
       this.pistonShadows = new THREE.InstancedMesh(
         new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: '#2a2040', transparent: true, opacity: 0.32, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ color: this.theme.shadow, transparent: true, opacity: 0.32, depthWrite: false }),
         this.pistonItems.length,
       );
       this.pistonShadows.frustumCulled = false;
-      this.scene.add(this.pistonShadows, this.pistons);
+      this.track.add(this.pistonShadows);
     }
     if (this.laserItems.length > 0) {
       this.lasers = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), this.laserMaterial, this.laserItems.length);
       this.lasers.frustumCulled = false;
-      this.scene.add(this.lasers);
+      this.track.add(this.lasers);
       this.buildLaserEmitters();
     }
     if (this.magnetItems.length > 0) {
       this.magnets = new THREE.InstancedMesh(
         new THREE.TorusGeometry(1, 0.03, 4, 24),
-        new THREE.MeshBasicMaterial({ color: this.theme.magnet, transparent: true, opacity: 0.8, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ color: this.theme.accent, transparent: true, opacity: 0.8, depthWrite: false }),
         this.magnetItems.length * 2,
       );
       this.magnets.frustumCulled = false;
-      this.scene.add(this.magnets);
+      this.track.add(this.magnets);
     }
   }
 
@@ -482,7 +671,7 @@ export class View {
     const count = this.laserItems.length;
     const posts = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshLambertMaterial({ color: this.theme.piston, flatShading: true }),
+      new THREE.MeshLambertMaterial({ color: this.theme.wall, flatShading: true }),
       count * 2,
     );
     const guides = new THREE.InstancedMesh(
@@ -506,7 +695,7 @@ export class View {
       const guideScale = l.axis === 'x' ? new THREE.Vector3(l.span, 1, LASER_GUIDE_WIDTH) : new THREE.Vector3(LASER_GUIDE_WIDTH, 1, l.span);
       guides.setMatrixAt(i, this.m.compose(this.v.set(l.x, l.y + 0.05, l.z), this.identity, guideScale));
     });
-    this.scene.add(posts, guides, this.laserLenses);
+    this.track.add(posts, guides, this.laserLenses);
   }
 
   private laserEnd(l: Laser, side: number): void {
@@ -519,17 +708,15 @@ export class View {
     const world = this.game.world;
     this.pistonItems.forEach((p, i) => {
       const height = world.pistonHeight(p);
-      this.sc.set(p.size, PISTON_DEPTH, p.size);
-      this.m.compose(this.v.set(p.x, p.y + height + PISTON_DEPTH / 2, p.z), this.identity, this.sc);
-      this.pistons!.setMatrixAt(i, this.m);
+      const mesh = this.pistons[i];
+      mesh.position.set(p.x, p.y + height + PISTON_DEPTH / 2, p.z);
+      mesh.scale.set(p.size, PISTON_DEPTH, p.size);
+      mesh.material.opacity = 1 - (1 - PISTON_SEE_THROUGH) * Math.min(1, Math.max(0, (height - PISTON_SOLID_BELOW) / PISTON_FADE));
       this.sc.set(p.size, 1, p.size);
       this.m.compose(this.v.set(p.x, p.y + 0.05, p.z), this.identity, this.sc);
       this.pistonShadows!.setMatrixAt(i, this.m);
     });
-    if (this.pistons) {
-      this.pistons.instanceMatrix.needsUpdate = true;
-      this.pistonShadows!.instanceMatrix.needsUpdate = true;
-    }
+    if (this.pistonShadows) this.pistonShadows.instanceMatrix.needsUpdate = true;
 
     let brightest = 0;
     this.laserItems.forEach((l, i) => {
@@ -569,6 +756,8 @@ export class View {
   }
 
   private resize(): void {
+    const pixelWidth = this.theme.pixelWidth;
+    this.renderer.setPixelRatio(pixelWidth ? pixelWidth / Math.min(innerWidth, innerHeight) : Math.min(devicePixelRatio, 1.5));
     this.renderer.setSize(innerWidth, innerHeight);
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
@@ -600,7 +789,15 @@ export class View {
     }
 
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.012);
-    this.chevronMaterial.color.setRGB(0.85 + pulse * 0.15, 1, 0.85 + pulse * 0.15);
+    this.chevronMaterial.color.setScalar(0.85 + pulse * 0.15);
+
+    this.extras.update(dt, this.ball, b.vx, b.vz, g.state === 'loop');
+    if (this.theme.ball.neon) {
+      this.color.copy(this.neonA).lerp(this.neonB, 0.5 + 0.5 * Math.sin(performance.now() * NEON_RATE));
+      this.ballMaterial.color.copy(this.color);
+      this.extras.tint(this.color);
+    }
+    this.updateTrail(dt, g.speed);
 
     this.updateCamera(dt, g.speed);
     this.updateSpace(dt);
@@ -609,6 +806,7 @@ export class View {
     this.updateOrbs();
     this.updateCrumbles();
     this.updateHazards();
+    this.raceView?.update(dt);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -627,11 +825,11 @@ export class View {
 
     // Keep the marble low on screen with the road ahead of it above.
     // In a loop it comes back on itself, and looking ahead would throw the view back and forth.
-    const ahead = g.state === 'loop' ? 0 : LOOK_AHEAD_SECONDS;
+    const ahead = g.state === 'loop' ? 0 : g.race ? RACE_LOOK_AHEAD_SECONDS : LOOK_AHEAD_SECONDS;
     this.wantTarget.set(
       b.x + b.vx * ahead,
       g.state === 'loop' ? g.groundY : b.y,
-      b.z + b.vz * ahead - this.dist * BALL_LOW_ON_SCREEN,
+      b.z + b.vz * ahead - (g.race ? 0 : this.dist * BALL_LOW_ON_SCREEN),
     );
     const follow = this.snap ? 1 : 1 - Math.exp(-dt * 6);
     this.target.lerp(this.wantTarget, follow);
@@ -660,7 +858,7 @@ export class View {
     this.spaceMix += ((inSpace ? 1 : 0) - this.spaceMix) * (1 - Math.exp(-dt * 6));
     this.bg.copy(this.sky).lerp(this.jumpSpace, this.spaceMix);
     // Towers sink into the dark so nothing competes with the marble's arc.
-    this.backMaterial.color.setRGB(1, 1, 1).lerp(this.backInSpace, this.spaceMix);
+    for (const m of this.backMaterials) m.color.setRGB(1, 1, 1).lerp(this.backInSpace, this.spaceMix);
 
     const rings = this.rings;
     if (!rings) return;
@@ -721,13 +919,20 @@ export class View {
   }
 }
 
-// Stripes across speed zones give the eye a beat to count; everything else is a soft checker.
-function toneIndex(c: Cell): number {
-  if (c.kind === 'fast') {
-    const along = c.dir === 'N' ? c.iz : c.ix;
-    return Math.abs(Math.floor(along / 2)) % 2;
-  }
-  return Math.abs(c.ix + c.iz) % 2;
+// Texture coordinates from position in the world, so one repeat of a pattern runs across many blocks.
+function worldMapped(material: THREE.MeshLambertMaterial, instanced = true): THREE.MeshLambertMaterial {
+  const placed = instanced ? 'instanceMatrix * vec4(position, 1.0)' : 'modelMatrix * vec4(position, 1.0)';
+  const span = (CELL * PATTERN_CELLS).toFixed(1);
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <uv_vertex>',
+      `#include <uv_vertex>
+      vec4 worldAt = ${placed};
+      vMapUv = (abs(normal.y) > 0.5 ? worldAt.xz : worldAt.xy + worldAt.zy) / ${span};`,
+    );
+  };
+  material.customProgramCacheKey = () => placed;
+  return material;
 }
 
 function makeMatcap(theme: BallTheme): THREE.Texture {

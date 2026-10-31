@@ -1,13 +1,14 @@
 export const CELL = 2;
 
-export type Kind = 'plain' | 'ramp' | 'boost' | 'fast' | 'maze' | 'pad' | 'wall' | 'finish' | 'crumble' | 'launch';
-export type Dir = 'N' | 'W' | 'E';
+export type Kind = 'plain' | 'ramp' | 'boost' | 'fast' | 'maze' | 'pad' | 'wall' | 'finish' | 'crumble' | 'launch' | 'ice';
+export type Dir = 'N' | 'W' | 'E' | 'S';
 
-// The camera faces -z, so N is straight up the screen, W is left and E is right.
+// The camera faces -z, so N is straight up the screen, W is left, E is right and S is down it.
 export const DIR_VEC: Record<Dir, { x: number; z: number }> = {
   N: { x: 0, z: -1 },
   W: { x: -1, z: 0 },
   E: { x: 1, z: 0 },
+  S: { x: 0, z: 1 },
 };
 
 export interface Cell {
@@ -91,12 +92,21 @@ export type CourseOp =
   | { op: 'rally'; offsets: number[]; space: number; size?: number }
   | { op: 'piston'; along: number; across: number; size: number; period: number; phase?: number }
   | { op: 'laser'; along: number; width: number; period: number; phase?: number }
-  | { op: 'magnet'; along: number; across: number; radius: number; strength: number };
+  | { op: 'magnet'; along: number; across: number; radius: number; strength: number }
+  // Weapon boxes in a row across the track, for racing.
+  | { op: 'items'; along: number; across: number[] }
+  // Arenas are drawn as rectangles at fixed places, in cells. Where they overlap, the earlier one stays,
+  // so the highest platforms come first. rx and rz are how much it rises across its width and depth.
+  | { op: 'plate'; x: number; z: number; w: number; d: number; h: number; rx?: number; rz?: number; kind?: Kind; dir?: Dir }
+  | { op: 'spawn'; x: number; z: number }
+  | { op: 'box'; x: number; z: number };
 
 export interface CourseData {
   version: 1;
   id: string;
   name: string;
+  // A course runs from a start to a finish, a circuit joins up with itself, an arena is fought in.
+  kind?: 'course' | 'circuit' | 'arena';
   ops: CourseOp[];
 }
 
@@ -104,7 +114,7 @@ const WALL_HEIGHT = 2.5;
 const LANDING_ROWS = 3;
 const ORB_HEIGHT = 1.4;
 
-const key = (ix: number, iz: number): number => (ix + 5000) * 10000 + (iz + 5000);
+const key = (ix: number, iz: number): number => (ix + 20000) * 40000 + (iz + 20000);
 
 export class Course {
   readonly cells = new Map<number, Cell>();
@@ -114,6 +124,8 @@ export class Course {
   readonly orbs: Point[] = [];
   readonly hazards: Hazard[] = [];
   readonly loops: Loop[] = [];
+  readonly itemBoxes: Point[] = [];
+  overlaps = 0; // cells of a straight piece that landed on track already there, which the course shouldn't do
 
   private cx = 0;
   private cz = 0;
@@ -124,6 +136,11 @@ export class Course {
 
   constructor(readonly data: CourseData) {
     for (const step of data.ops) this.apply(step);
+  }
+
+  // Where the next piece would start, and which way it would be heading.
+  get end(): { x: number; z: number; h: number; dir: Dir | null } {
+    return { x: this.cx, z: this.cz, h: this.h, dir: this.dir };
   }
 
   cellAt(x: number, z: number): Cell | undefined {
@@ -162,7 +179,7 @@ export class Course {
       }
       case 'laser': {
         const p = this.placed(step.along, 0);
-        const axis = this.dir === 'N' ? 'x' : 'z';
+        const axis = this.dir === 'N' || this.dir === 'S' ? 'x' : 'z';
         this.hazards.push({ type: 'laser', ...p, span: step.width * CELL, axis, period: step.period, phase: step.phase ?? 0 });
         return;
       }
@@ -171,12 +188,42 @@ export class Course {
         this.hazards.push({ type: 'magnet', ...p, radius: step.radius * CELL, strength: step.strength });
         return;
       }
+      case 'plate':
+        return this.plate(step);
+      case 'spawn':
+        this.addCheckpoint((step.x + 0.5) * CELL, this.cellHeight(step.x, step.z), (step.z + 0.5) * CELL);
+        return;
+      case 'box':
+        this.itemBoxes.push({ x: (step.x + 0.5) * CELL, y: this.cellHeight(step.x, step.z) + ORB_HEIGHT, z: (step.z + 0.5) * CELL });
+        return;
+      case 'items':
+        for (const across of step.across) {
+          const p = this.placed(step.along, across);
+          this.itemBoxes.push({ ...p, y: p.y + ORB_HEIGHT });
+        }
+        return;
+    }
+  }
+
+  private cellHeight(ix: number, iz: number): number {
+    const c = this.cells.get(key(ix, iz));
+    return c ? this.heightOn(c, (ix + 0.5) * CELL, (iz + 0.5) * CELL) : 0;
+  }
+
+  private plate(s: Extract<CourseOp, { op: 'plate' }>): void {
+    const sx = (s.rx ?? 0) / (s.w * CELL);
+    const sz = (s.rz ?? 0) / (s.d * CELL);
+    const kind = s.kind ?? (sx !== 0 || sz !== 0 ? 'ramp' : 'plain');
+    for (let a = 0; a < s.w; a++) {
+      for (let b = 0; b < s.d; b++) {
+        this.put({ ix: s.x + a, iz: s.z + b, h: s.h + (sx * a + sz * b) * CELL, sx, sz, kind, section: 0, dir: s.dir });
+      }
     }
   }
 
   private placed(along: number, across: number): Point {
     const d = DIR_VEC[this.dir ?? 'N'];
-    // Right of travel: N gives +x, W gives -z, E gives +z.
+    // Right of travel: N gives +x, W gives -z, E gives +z, S gives -x.
     const x = (this.cx + 0.5 + d.x * along - d.z * across) * CELL;
     const z = (this.cz + 0.5 + d.z * along + d.x * across) * CELL;
     const c = this.cellAt(x, z);
@@ -212,19 +259,21 @@ export class Course {
     const kind = s.kind ?? (rise !== 0 ? 'ramp' : 'plain');
     const left = -Math.floor(width / 2);
     // Heights are stored at the min corner, which is the far end when travelling towards -x or -z.
-    const towardsMin = dir !== 'E';
+    const towardsMin = dir === 'N' || dir === 'W';
+    const alongZ = dir === 'N' || dir === 'S';
 
     for (let k = 0; k < len; k++) {
       const near = this.h + (rise * k) / len;
       const far = this.h + (rise * (k + 1)) / len;
       const gradient = (towardsMin ? near - far : far - near) / CELL;
       for (let w = left; w < left + width; w++) {
+        if (this.cells.has(key(this.cx + d.x * k + (alongZ ? w : 0), this.cz + d.z * k + (alongZ ? 0 : w)))) this.overlaps++;
         this.put({
-          ix: this.cx + d.x * k + (dir === 'N' ? w : 0),
-          iz: this.cz + d.z * k + (dir === 'N' ? 0 : w),
+          ix: this.cx + d.x * k + (alongZ ? w : 0),
+          iz: this.cz + d.z * k + (alongZ ? 0 : w),
           h: towardsMin ? far : near,
-          sx: dir === 'N' ? 0 : gradient,
-          sz: dir === 'N' ? gradient : 0,
+          sx: alongZ ? 0 : gradient,
+          sz: alongZ ? gradient : 0,
           kind,
           section,
           dir,
@@ -237,9 +286,9 @@ export class Course {
       const k = ((i + 0.5) * len) / orbs;
       const lane = s.orbLane ?? 0;
       this.orbs.push({
-        x: (this.cx + 0.5 + d.x * k + (dir === 'N' ? lane : 0)) * CELL,
+        x: (this.cx + 0.5 + d.x * k + (alongZ ? lane : 0)) * CELL,
         y: this.h + (rise * k) / len + ORB_HEIGHT,
-        z: (this.cz + 0.5 + d.z * k + (dir === 'N' ? 0 : lane)) * CELL,
+        z: (this.cz + 0.5 + d.z * k + (alongZ ? 0 : lane)) * CELL,
       });
     }
 
@@ -334,33 +383,39 @@ export class Course {
     this.hops.set(this.lastPad, { from: this.checkpoints[this.lastPad], to });
   }
 
+  // A flat square that starts right after the lane in and ends right at the side of the lane out,
+  // which is its own width across and centred where the next piece will be.
   private corner(next: Dir, nextWidth: number): void {
     const prev = DIR_VEC[this.dir!];
-    const pivotX = this.cx - prev.x;
-    const pivotZ = this.cz - prev.z;
-    const back = Math.floor(this.width / 2);
-    const front = Math.ceil(this.width / 2);
-    const side = -Math.floor(nextWidth / 2);
+    const n = DIR_VEC[next];
+    const alongX = prev.x !== 0;
+    const forward = prev.x + prev.z > 0;
+    const sideways = n.x + n.z > 0;
+    const p = alongX ? this.cx : this.cz;
+    const q = alongX ? this.cz : this.cx;
+    const pCentre = forward ? p + Math.floor(nextWidth / 2) : p - Math.ceil(nextWidth / 2) + 1;
+    const pMin = pCentre - Math.floor(nextWidth / 2);
+    const pMax = pCentre + Math.ceil(nextWidth / 2) - 1;
+    const qMin = q - Math.floor(this.width / 2);
+    const qMax = q + Math.ceil(this.width / 2) - 1;
     const section = this.checkpoints.length - 1;
 
-    const n = DIR_VEC[next];
-    const place = (along: number, across: number, kind: Kind, h: number): void => {
-      // along runs in the next direction; across runs against the previous one.
-      const ix = pivotX + n.x * along - prev.x * across;
-      const iz = pivotZ + n.z * along - prev.z * across;
+    const place = (a: number, b: number, kind: Kind, h: number): void => {
+      const ix = alongX ? a : b;
+      const iz = alongX ? b : a;
       if (!this.cells.has(key(ix, iz))) this.put({ ix, iz, h, sx: 0, sz: 0, kind, section });
     };
-
-    for (let a = -back; a < front; a++) {
-      for (let s = side; s < side + nextWidth; s++) place(a, s, 'plain', this.h);
-    }
+    for (let a = pMin; a <= pMax; a++) for (let b = qMin; b <= qMax; b++) place(a, b, 'plain', this.h);
     // Raised lip on the outside of the turn, so corners can be taken fast.
     const lip = this.h + WALL_HEIGHT;
-    for (let a = -back - 1; a < front; a++) place(a, side - 1, 'wall', lip);
-    for (let s = side - 1; s < side + nextWidth; s++) place(-back - 1, s, 'wall', lip);
+    const far = forward ? pMax + 1 : pMin - 1;
+    const behind = sideways ? qMin - 1 : qMax + 1;
+    for (let b = qMin - 1; b <= qMax + 1; b++) place(far, b, 'wall', lip);
+    for (let a = pMin; a <= pMax; a++) place(a, behind, 'wall', lip);
 
-    this.cx = pivotX + n.x * front;
-    this.cz = pivotZ + n.z * front;
+    const onward = sideways ? qMax + 1 : qMin - 1;
+    this.cx = alongX ? pCentre : onward;
+    this.cz = alongX ? onward : pCentre;
   }
 
   private put(cell: Cell): void {

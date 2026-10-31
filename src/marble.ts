@@ -1,4 +1,4 @@
-import { DIR_VEC } from './course';
+import { DIR_VEC, type Dir } from './course';
 import type { World } from './world';
 
 const GRAVITY_ACCEL = 34;
@@ -14,6 +14,8 @@ const REACH = 0.9;
 const FAST_DRAG = 0.3;
 const FAST_PUSH = 34;
 const MAZE_DRAG = 1.8;
+const ICE_DRAG = 0.1;
+const ICE_GRIP = 0.3; // of the usual thrust: a slide to be planned ahead
 const BOOST_KICK = 40;
 const BOOST_PUSH = 50;
 const BURST_PUSH = 90;
@@ -68,13 +70,14 @@ export class Marble {
     const cell = world.cellAt(this.x, this.z);
 
     if (this.grounded && cell) {
-      const drag = cell.kind === 'fast' ? FAST_DRAG : cell.kind === 'maze' ? MAZE_DRAG : DRAG;
+      const drag = cell.kind === 'fast' ? FAST_DRAG : cell.kind === 'maze' ? MAZE_DRAG : cell.kind === 'ice' ? ICE_DRAG : DRAG;
+      const thrust = cell.kind === 'ice' ? THRUST * ICE_GRIP : THRUST;
       this.field.x = 0;
       this.field.z = 0;
       world.addFieldForce(this.x, this.z, this.field);
       // Slopes pull the marble downhill; tilt pushes it around like a table.
-      this.vx += (forceX * THRUST + this.field.x - cell.sx * GRAVITY_ACCEL - this.vx * drag) * dt;
-      this.vz += (forceZ * THRUST + this.field.z - cell.sz * GRAVITY_ACCEL - this.vz * drag) * dt;
+      this.vx += (forceX * thrust + this.field.x - cell.sx * GRAVITY_ACCEL - this.vx * drag) * dt;
+      this.vz += (forceZ * thrust + this.field.z - cell.sz * GRAVITY_ACCEL - this.vz * drag) * dt;
 
       if (cell.dir && (cell.kind === 'boost' || cell.kind === 'fast' || cell.kind === 'launch')) {
         const d = DIR_VEC[cell.dir];
@@ -141,7 +144,7 @@ export class Marble {
     this.onEvent?.('launch');
   }
 
-  private applyBurst(dt: number, fallback: 'N' | 'W' | 'E' | undefined): void {
+  private applyBurst(dt: number, fallback: Dir | undefined): void {
     const speed = this.speed;
     const d = DIR_VEC[fallback ?? 'N'];
     const ux = speed > 1 ? this.vx / speed : d.x;
@@ -150,12 +153,12 @@ export class Marble {
     this.vz += uz * BURST_PUSH * dt;
   }
 
-  // Walls: a block more than a small step above the marble stops that axis.
+  // Walls: a block more than a small step above the marble, or a lowered piston, stops that axis.
   private moveAxis(world: World, dx: number, dz: number): void {
     if (dx === 0 && dz === 0) return;
     const probeX = this.x + dx + Math.sign(dx) * REACH;
     const probeZ = this.z + dz + Math.sign(dz) * REACH;
-    if (world.surface(probeX, probeZ) > this.y + STEP_UP) {
+    if (world.surface(probeX, probeZ) > this.y + STEP_UP || world.blockedByPiston(probeX, this.y, probeZ)) {
       const impact = Math.abs(dx !== 0 ? this.vx : this.vz);
       if (dx !== 0) this.vx *= -BOUNCE;
       else this.vz *= -BOUNCE;

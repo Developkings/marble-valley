@@ -1,15 +1,22 @@
 {
-  "name": "marble-valey",
+  "name": "marble-valley",
+  "productName": "Marble Valley",
+  "main": "desktop/main.cjs",
+  "homepage": "https://github.com/Developkings/marble-valley",
   "version": "1.0.0",
-  "description": "",
+  "description": "A tilt-controlled marble time attack and battle game.",
   "scripts": {
+    "test": "vitest run",
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "desktop": "vite build && electron .",
+    "build:apk": "node scripts/build-apk.mjs",
+    "build:pc": "vite build && electron-builder --win portable --x64"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Developkings",
+  "license": "UNLICENSED",
   "dependencies": {
     "@capacitor/android": "^8.6.0",
     "@capacitor/core": "^8.6.0",
@@ -19,8 +26,30 @@
   "devDependencies": {
     "@capacitor/cli": "^8.6.0",
     "@types/three": "^0.187.0",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   },
-  "type": "module"
+  "type": "module",
+  "build": {
+    "appId": "com.marblevalley.game",
+    "productName": "Marble Valley",
+    "directories": {
+      "output": "desktop-out"
+    },
+    "files": [
+      "desktop/**",
+      "dist/**",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "MarbleValley-Portable.exe"
+    }
+  }
 }

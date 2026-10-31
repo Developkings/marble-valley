@@ -5,44 +5,69 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <title>Marble Valley</title>
     <style>
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #f3d9c9; touch-action: none; user-select: none; -webkit-user-select: none; }
-      body { font-family: Georgia, 'Times New Roman', serif; color: #4a3b52; }
+      :root { --font: Georgia, serif; --ink: #4a3b52; --paper: #fff8f0; --page: #f3d9c9; --pressed: #e8a48f; --accent: #e8795a; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--page); touch-action: none; user-select: none; -webkit-user-select: none; }
+      body { font-family: var(--font); color: var(--ink); }
       canvas { position: fixed; inset: 0; display: block; }
       .hud { position: fixed; left: 0; right: 0; top: 0; padding: max(16px, env(safe-area-inset-top)) 20px 0; display: flex; justify-content: space-between; align-items: baseline; pointer-events: none; font-variant-numeric: tabular-nums; }
       .hud[hidden] { display: none; }
       #time { font-size: 30px; letter-spacing: 1px; }
       #speed { font-size: 16px; opacity: 0.75; }
-      #meter { width: 96px; height: 10px; border: 1px solid #4a3b52; background: rgba(255, 248, 240, 0.6); align-self: center; }
-      #meterFill { height: 100%; background: #39c6ff; transform: scaleX(0); transform-origin: left; }
+      #meter { width: 96px; height: 10px; border: 1px solid var(--ink); background: var(--paper); align-self: center; }
+      #meterFill { height: 100%; background: var(--accent); transform: scaleX(0); transform-origin: left; }
       #callout { position: fixed; left: 0; right: 0; top: 24%; text-align: center; font-size: 30px; letter-spacing: 2px; pointer-events: none; transition: color 0.2s; }
       .panel { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 24px; }
       .panel[hidden] { display: none; }
       h1 { font-weight: normal; font-size: 40px; letter-spacing: 3px; margin: 0 0 4px; }
       p { margin: 0; line-height: 1.45; max-width: 320px; }
-      button { font: inherit; color: inherit; background: #fff8f0; border: 1px solid #4a3b52; padding: 12px 32px; min-width: 180px; font-size: 18px; letter-spacing: 1px; }
-      button:active { background: #e8a48f; }
-      #labValue { font-size: 72px; font-variant-numeric: tabular-nums; line-height: 1; }
-      #labLog, #labLive { font-family: monospace; font-size: 13px; white-space: pre; text-align: left; }
-      #lab { background: #f3d9c9; }
+      button { font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--ink); padding: 12px 32px; min-width: 180px; font-size: 18px; letter-spacing: 1px; }
+      button:active { background: var(--pressed); }
       .controls { position: fixed; left: 0; right: 0; bottom: 0; padding: 0 16px max(16px, env(safe-area-inset-bottom)); display: flex; justify-content: space-between; pointer-events: none; }
       .controls[hidden] { display: none; }
-      .controls button { pointer-events: auto; min-width: 0; padding: 10px 16px; font-size: 15px; background: rgba(255, 248, 240, 0.75); }
+      .controls button { pointer-events: auto; min-width: 0; padding: 10px 16px; font-size: 15px; background: var(--paper); opacity: 0.85; }
       #jumpCue { position: fixed; left: 0; right: 0; top: 32%; display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none; }
       #jumpCue[hidden] { display: none; }
       #jumpArrow { width: 110px; height: 110px; fill: #ffffff; stroke: #1b1247; stroke-width: 3; }
       #jumpCue.land #jumpArrow { fill: #f9c74f; }
       #jumpTimer { width: 160px; height: 10px; border: 1px solid #ffffff; }
       #jumpTimerFill { height: 100%; background: #ffffff; transform-origin: left; }
-      .page { background: #f3d9c9; justify-content: flex-start; overflow-y: auto; touch-action: pan-y; padding-top: max(24px, env(safe-area-inset-top)); }
+      .page { background: var(--page); justify-content: flex-start; overflow-y: auto; touch-action: pan-y; padding-top: max(24px, env(safe-area-inset-top)); }
       .page h2 { font-weight: normal; font-size: 28px; letter-spacing: 2px; margin: 8px 0 0; }
       .page h3 { font-weight: normal; font-size: 18px; letter-spacing: 1px; margin: 12px 0 0; }
       .setting { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 320px; }
-      .setting input { width: 100%; accent-color: #4a3b52; height: 32px; touch-action: none; }
+      .setting input { width: 100%; accent-color: var(--ink); height: 32px; touch-action: none; }
       .credit { max-width: 340px; line-height: 1.4; font-size: 15px; }
       .credit a { color: inherit; }
+      .themeChoice { width: 100%; max-width: 320px; height: 64px; font-weight: bold; text-shadow: 0 0 4px #000, 0 1px 2px #000; color: #ffffff; }
+      .themeChoice.current { outline: 3px solid var(--ink); outline-offset: 2px; }
       .credit small { display: block; opacity: 0.8; }
       #mitText { max-width: 340px; font-size: 11px; line-height: 1.4; text-align: left; white-space: pre-line; opacity: 0.8; }
-      #recordsList { font-size: 18px; font-variant-numeric: tabular-nums; line-height: 1.7; }
+      #recordsList, #resultsList, #roomRecords { font-size: 18px; font-variant-numeric: tabular-nums; line-height: 1.7; white-space: pre; }
+      #raceHud { position: fixed; left: 0; right: 0; top: max(56px, calc(env(safe-area-inset-top) + 40px)); padding: 0 20px; display: flex; justify-content: space-between; pointer-events: none; font-size: 20px; }
+      #raceHud[hidden] { display: none; }
+      #weapon { position: fixed; left: 0; right: 0; bottom: max(76px, calc(env(safe-area-inset-bottom) + 60px)); text-align: center; pointer-events: none; font-size: 24px; letter-spacing: 1px; color: var(--accent); text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); }
+      .choices { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 340px; }
+      .choices button { min-width: 0; padding: 10px 14px; font-size: 15px; }
+      button.chosen { outline: 3px solid var(--ink); outline-offset: 1px; }
+      button:disabled { opacity: 0.5; }
+      .nameInput { font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--ink); padding: 10px; height: auto; touch-action: auto; box-sizing: border-box; user-select: text; -webkit-user-select: text; }
+      #roomList { display: flex; flex-direction: column; gap: 8px; }
+      #lobbyPlayers { font-size: 20px; line-height: 1.5; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35); }
+      #results { background: var(--page); }
+      #hearts { position: fixed; left: 0; right: 0; top: 0; padding: max(10px, env(safe-area-inset-top)) 12px 0; display: flex; flex-direction: column; align-items: center; gap: 4px; pointer-events: none; }
+      #hearts[hidden] { display: none; }
+      #heartsOwn svg { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)); }
+      #heartsOthers { display: flex; gap: 14px; font-size: 13px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4); }
+      #heartsOthers div { display: flex; flex-direction: column; align-items: center; }
+      .levelChoice { width: 100%; max-width: 320px; display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 12px 16px; font-size: 16px; }
+      .levelChoice small { font-size: 14px; opacity: 0.75; font-variant-numeric: tabular-nums; }
+      .trackRow { display: flex; gap: 6px; width: 100%; max-width: 320px; }
+      .trackRow button { min-width: 0; padding: 10px; font-size: 15px; }
+      .trackRow .levelChoice { flex: 1; }
+      #editMap { width: 100%; max-width: 340px; height: 34vh; min-height: 200px; flex: none; position: static; background: var(--paper); border: 1px solid var(--ink); box-sizing: border-box; }
+      .pad4 { display: grid; grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(2, 48px); gap: 4px; justify-content: center; }
+      .pad4 button { min-width: 0; padding: 0; font-size: 22px; }
+      #editMessage { min-height: 1.4em; }
     </style>
   </head>
   <body>
@@ -56,6 +81,15 @@
       <button class="musicToggle"></button>
       <button id="toMenu">Menu</button>
     </div>
+    <div id="raceHud" hidden>
+      <div id="raceLap"></div>
+      <div id="racePlace"></div>
+    </div>
+    <div id="hearts" hidden>
+      <div id="heartsOwn"></div>
+      <div id="heartsOthers"></div>
+    </div>
+    <div id="weapon"></div>
     <div id="callout"></div>
     <div id="jumpCue" hidden>
       <svg id="jumpArrow" viewBox="-50 -50 100 100"><path d="M0 -44 L34 -6 L14 -6 L14 40 L-14 40 L-14 -6 L-34 -6 Z" /></svg>
@@ -65,11 +99,96 @@
     <div class="panel" id="menu">
       <h1>Marble Valley</h1>
       <p id="menuText">Hold the phone comfortably. During the countdown, that angle becomes neutral.</p>
+      <button id="again" hidden>Play again</button>
+      <button id="nextLevel" hidden>Next</button>
       <button id="play">Play</button>
-      <button class="musicToggle"></button>
+      <button id="openMulti">Multiplayer</button>
+      <button id="openMine">Track creator</button>
+      <button id="openThemes">Themes</button>
       <button id="openRecords">Records</button>
       <button id="openSettings">Settings</button>
-      <button id="openLab">Sensor Lab</button>
+    </div>
+
+    <div class="panel page" id="welcome" hidden>
+      <h1>Marble Valley</h1>
+      <p>What should other players call you?</p>
+      <label class="setting">Your name<input id="welcomeName" class="nameInput" maxlength="16" /></label>
+      <button id="welcomeDone">Start</button>
+    </div>
+
+    <div class="panel page" id="levels" hidden>
+      <h2>Courses</h2>
+      <div id="levelList" class="setting"></div>
+      <button id="closeLevels">Back</button>
+    </div>
+
+    <div class="panel page" id="mine" hidden>
+      <h2>Track creator</h2>
+      <button id="newTrack">New track</button>
+      <div id="mineList" class="setting"></div>
+      <button id="closeMine">Back</button>
+    </div>
+
+    <div class="panel page" id="editor" hidden>
+      <canvas id="editMap"></canvas>
+      <p id="editMessage"></p>
+      <div class="pad4">
+        <span></span><button id="editN" aria-label="Add a piece heading up">&#8593;</button><span></span>
+        <button id="editW" aria-label="Add a piece heading left">&#8592;</button><button id="editS" aria-label="Add a piece heading down">&#8595;</button><button id="editE" aria-label="Add a piece heading right">&#8594;</button>
+      </div>
+      <div id="editLength" class="choices"></div>
+      <div id="editWidth" class="choices"></div>
+      <div id="editSlope" class="choices"></div>
+      <div id="editSurface" class="choices"></div>
+      <h3>Add</h3>
+      <div class="choices">
+        <button id="editBoost">Boost</button><button id="editJump">Jump</button><button id="editLoop">Loop</button><button id="editPads">Pads</button>
+        <button id="editMaze">Maze</button><button id="editPiston">Piston</button><button id="editLaser">Laser</button><button id="editMagnet">Magnet</button>
+      </div>
+      <label class="setting">Name<input id="editName" class="nameInput" maxlength="32" /></label>
+      <div class="choices">
+        <button id="editUndo">Undo</button><button id="editTest">Test</button><button id="editSave">Save</button><button id="closeEditor">Back</button>
+      </div>
+    </div>
+
+    <div class="panel page" id="multi" hidden>
+      <h2>Multiplayer</h2>
+      <p>Everyone needs to be on the same Wi-Fi.</p>
+      <p id="multiName"></p>
+      <button id="hostRoom">Host a room</button>
+      <p id="multiStatus"></p>
+      <div id="roomList" class="setting"></div>
+      <button id="closeMulti">Back</button>
+    </div>
+
+    <div class="panel page" id="lobby" hidden>
+      <h2 id="lobbyTitle">Room</h2>
+      <div id="lobbyPlayers"></div>
+      <p id="lobbyChosen"></p>
+      <h3 id="lobbyTracksTitle">Tracks</h3>
+      <div id="lobbyTracks" class="choices"></div>
+      <h3 id="lobbyArenasTitle">Battle arenas</h3>
+      <div id="lobbyArenas" class="choices"></div>
+      <h3 id="lobbyMineTitle">Your tracks</h3>
+      <div id="lobbyMine" class="choices"></div>
+      <div id="lobbyLaps" class="choices"></div>
+      <button id="startRace">Start race</button>
+      <p id="lobbyWait">Waiting for the host to start.</p>
+      <h3>Room records</h3>
+      <div id="roomRecords"></div>
+      <button id="leaveRoom">Leave room</button>
+    </div>
+
+    <div class="panel page" id="results" hidden>
+      <h2>Results</h2>
+      <div id="resultsList"></div>
+      <button id="closeResults">Back to room</button>
+    </div>
+
+    <div class="panel page" id="themes" hidden>
+      <h2>Themes</h2>
+      <div id="themeList" class="setting"></div>
+      <button id="closeThemes">Back</button>
     </div>
 
     <div class="panel page" id="records" hidden>
@@ -80,10 +199,12 @@
 
     <div class="panel page" id="settings" hidden>
       <h2>Settings</h2>
+      <label class="setting">Your name<input id="playerName" class="nameInput" maxlength="16" /></label>
+      <button class="musicToggle"></button>
       <label class="setting">Music<input type="range" id="setMusic" min="0" max="1" step="0.05" /></label>
       <div class="setting">Playing: <span id="musicName"></span></div>
-      <button id="chooseMusic">Use your own music</button>
-      <button id="defaultMusic" hidden>Back to default music</button>
+      <button id="chooseMusic">Add music for this theme</button>
+      <button id="defaultMusic" hidden>Remove this music</button>
       <input type="file" id="musicFile" accept="audio/*" hidden />
       <label class="setting">Sounds<input type="range" id="setSounds" min="0" max="1" step="0.05" /></label>
       <label class="setting">Tilt sensitivity<input type="range" id="setTilt" min="0" max="1" step="0.05" /></label>
@@ -93,21 +214,15 @@
 
     <div class="panel page" id="credits" hidden>
       <h2>Attribution</h2>
-      <h3>Music</h3>
-      <div id="musicCredits"></div>
-      <p class="credit"><small>This is the game's default music. Music you add yourself stays on your phone and is not shared.</small></p>
+      <div id="musicBlock">
+        <h3>Music</h3>
+        <div id="musicCredits"></div>
+      </div>
+      <p class="credit"><small>Music you add yourself stays on your phone and is not shared.</small></p>
       <h3>Software</h3>
       <div id="softwareCredits"></div>
       <div id="mitText"></div>
       <button id="closeCredits">Back</button>
-    </div>
-
-    <div class="panel" id="lab" hidden>
-      <p>Hold the phone still, then move it in any direction and stop.</p>
-      <div id="labValue">--</div>
-      <div id="labLive"></div>
-      <div id="labLog"></div>
-      <button id="closeLab">Back</button>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

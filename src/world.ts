@@ -76,6 +76,16 @@ export class World {
     return f < LASER_WARN_AT ? 0 : f < LASER_ON_AT ? 1 : 2;
   }
 
+  // A piston that has come down is as solid as a wall.
+  blockedByPiston(x: number, y: number, z: number): boolean {
+    for (const h of this.course.hazards) {
+      if (h.type !== 'piston') continue;
+      const half = h.size / 2;
+      if (Math.abs(x - h.x) < half && Math.abs(z - h.z) < half && h.y + this.pistonHeight(h) - y < PISTON_DANGER_HEIGHT) return true;
+    }
+    return false;
+  }
+
   isLethal(x: number, y: number, z: number): boolean {
     for (const h of this.course.hazards) {
       if (h.type === 'piston') {

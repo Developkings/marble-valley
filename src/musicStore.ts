@@ -1,7 +1,6 @@
-// The player's own music, kept on this device. A song is far too big for localStorage.
+// The player's own music, one song per theme, kept on this device. A song is far too big for localStorage.
 const DB_NAME = 'marble-music';
 const STORE = 'tracks';
-const OWN_TRACK = 'own';
 
 export interface OwnMusic {
   name: string;
@@ -26,26 +25,26 @@ async function withStore<T>(mode: IDBTransactionMode, use: (store: IDBObjectStor
   });
 }
 
-export async function loadOwnMusic(): Promise<OwnMusic | null> {
+export async function loadOwnMusic(themeId: string): Promise<OwnMusic | null> {
   try {
-    return (await withStore<OwnMusic | undefined>('readonly', (s) => s.get(OWN_TRACK))) ?? null;
+    return (await withStore<OwnMusic | undefined>('readonly', (s) => s.get(themeId))) ?? null;
   } catch {
     return null;
   }
 }
 
-export async function saveOwnMusic(music: OwnMusic): Promise<boolean> {
+export async function saveOwnMusic(themeId: string, music: OwnMusic): Promise<boolean> {
   try {
-    await withStore('readwrite', (s) => s.put(music, OWN_TRACK));
+    await withStore('readwrite', (s) => s.put(music, themeId));
     return true;
   } catch {
     return false; // storage full or blocked; the song still plays until the app closes
   }
 }
 
-export async function clearOwnMusic(): Promise<void> {
+export async function clearOwnMusic(themeId: string): Promise<void> {
   try {
-    await withStore('readwrite', (s) => s.delete(OWN_TRACK));
+    await withStore('readwrite', (s) => s.delete(themeId));
   } catch {
     // Nothing saved to clear.
   }

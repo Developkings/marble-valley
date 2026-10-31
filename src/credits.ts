@@ -7,19 +7,13 @@ export interface Credit {
   note?: string;
 }
 
-export const MUSIC_CREDITS: Credit[] = [
-  {
-    title: 'Adagio For Strings [kinda]',
-    by: 'Sascha Ende',
-    licence: 'CC BY 4.0, ende.app standard license',
-    url: 'https://ende.app/en/song/13253-adagio-for-strings-kinda',
-    note: 'Played on a loop, otherwise unchanged. Not the work by Samuel Barber.',
-  },
-];
+// Music added to public/music for a theme, with the theme's name in the note. Empty hides the section.
+export const MUSIC_CREDITS: Credit[] = [];
 
 export const SOFTWARE_CREDITS: Credit[] = [
   { title: 'three.js', by: 'Copyright © 2010-2026 three.js authors', licence: 'MIT', url: 'https://threejs.org' },
   { title: 'Capacitor', by: 'Copyright (c) 2017-present Drifty Co.', licence: 'MIT', url: 'https://capacitorjs.com' },
+  { title: 'Electron', by: 'Copyright (c) Electron contributors', licence: 'MIT', url: 'https://www.electronjs.org', note: 'The PC version' },
   { title: 'Capacitor Haptics', by: 'Copyright 2020-present Ionic', licence: 'MIT', url: 'https://capacitorjs.com' },
 ];
 

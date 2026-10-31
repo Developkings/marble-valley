@@ -1,5 +1,6 @@
-import { Course, DIR_VEC, FIRST_COURSE, loopPoint, type Hop, type Loop } from './course';
+import { Course, DIR_VEC, FIRST_COURSE, loopPoint, type CourseData, type Hop, type Loop } from './course';
 import { GRAVITY, Marble } from './marble';
+import type { Race } from './race';
 import type { Sensors } from './sensors';
 import { log } from './telemetry';
 import { World } from './world';
@@ -24,6 +25,11 @@ const DIRECTION_MATCH = Math.SQRT1_2; // within 45 degrees of the arrow
 const LATE_REACH = 0.3; // too late: the jump leaves the pad but never gets near the next one
 const BOUNCE_UP = 10; // landing without tilting back: bounces on, off the end of a pad
 const COUNTDOWN_SECONDS = 3;
+const RACE_RESPAWN_SECONDS = 2; // in a race, falling off is common and the others don't wait
+const GRID_BEHIND = 7; // the start grid, in world units behind the line
+const GRID_AHEAD = 4;
+const GRID_ROW = 3.5;
+const GRID_SPREAD = 3.6;
 const EXIT_SPEED = 55;
 const EXIT_SPEED_PER_CLEAN_HOP = 12;
 
@@ -34,10 +40,11 @@ const BURST_SECONDS_FULL = 2.2;
 const FALL_DEPTH = 34;
 
 export class Game {
-  readonly course = new Course(FIRST_COURSE);
-  readonly world = new World(this.course);
+  course = new Course(FIRST_COURSE);
+  world = new World(this.course);
   readonly ball = new Marble();
-  readonly orbTaken: boolean[] = this.course.orbs.map(() => false);
+  orbTaken: boolean[] = this.course.orbs.map(() => false);
+  race: Race | null = null;
   meter = 0;
   state: State = 'menu';
   time = 0;
@@ -92,6 +99,48 @@ export class Game {
     return null;
   }
 
+  // The race, or the single course, this game is played on from now on.
+  loadCourse(data: CourseData): void {
+    this.course = new Course(data);
+    this.world = new World(this.course);
+    this.orbTaken = this.course.orbs.map(() => false);
+    this.state = 'menu';
+    this.placeAt(0);
+  }
+
+  // Everyone's countdown ends together, so one that heard late has less of it left.
+  beginRace(race: Race, alreadyGone: number): void {
+    this.race = race;
+    this.world.reset();
+    this.section = 0;
+    this.time = 0;
+    this.accumulator = 0;
+    this.cleanHops = 0;
+    this.meter = 0;
+    this.burning = false;
+    this.orbTaken.fill(false);
+    const line = this.course.checkpoints[0];
+    const slot = race.gridSlot;
+    if (race.battle) {
+      race.section = slot % this.course.checkpoints.length;
+      this.placeAt(race.section);
+    } else {
+      // A circuit's grid waits behind the line. A track with a start has a wall behind it, so its grid is ahead.
+      const behind = race.open ? -GRID_AHEAD - (slot % 2) * GRID_ROW : GRID_BEHIND + (slot % 2) * GRID_ROW;
+      this.ball.placeAt(line.x + (slot - 1.5) * GRID_SPREAD, line.y, line.z + behind);
+      this.groundY = line.y;
+    }
+    this.startCountdown(false, COUNTDOWN_SECONDS - alreadyGone);
+  }
+
+  leaveRace(): void {
+    this.race = null;
+  }
+
+  get canBeHit(): boolean {
+    return this.state === 'run' || this.state === 'flight';
+  }
+
   // Back from the phone being put down or the app left: tilt has to be found again.
   realign(): void {
     if (this.state === 'run') this.startCountdown(false);
@@ -119,6 +168,12 @@ export class Game {
     log('run', { event: 'menu' });
   }
 
+  // A tap fires what the racer is holding, and otherwise spends the meter.
+  tap(): void {
+    if (this.state === 'run' && this.race?.useWeapon()) return;
+    this.activateBurst();
+  }
+
   // A tap spends the whole meter on one burst of speed.
   activateBurst(): void {
     if (this.state !== 'run' || this.meter <= 0 || this.ball.burstLeft > 0) return;
@@ -129,14 +184,14 @@ export class Game {
   }
 
   // The marble is held while the phone settles, then tilt is measured from however it is held now.
-  private startCountdown(costsTime: boolean): void {
+  private startCountdown(costsTime: boolean, seconds = COUNTDOWN_SECONDS): void {
     this.state = 'countdown';
-    this.countdownLeft = COUNTDOWN_SECONDS;
+    this.countdownLeft = seconds;
     this.countdownCostsTime = costsTime;
     this.tiltX = 0;
     this.tiltY = 0;
     this.sensors.calibrate();
-    this.onCallout?.(String(COUNTDOWN_SECONDS), 'count');
+    this.onCallout?.(String(Math.ceil(seconds)), 'count');
     this.onCue?.('tick');
   }
 
@@ -160,6 +215,10 @@ export class Game {
 
   update(dt: number, keyX: number, keyY: number): void {
     if (this.state === 'menu' || this.state === 'finished') return;
+    if (this.race?.over) {
+      this.finish();
+      return;
+    }
     this.world.clock += dt;
     if (this.state === 'countdown') {
       this.updateCountdown(dt);
@@ -205,6 +264,7 @@ export class Game {
     }
 
     this.collectOrbs();
+    this.race?.step(STEP);
 
     if (this.world.isLethal(b.x, b.y, b.z)) {
       this.respawn();
@@ -351,6 +411,11 @@ export class Game {
   private onGround(): void {
     const cell = this.world.cellAt(this.ball.x, this.ball.z);
     if (!cell) return;
+    if (this.race) {
+      if (cell.kind !== 'wall' && this.race.passCell(cell)) this.finish();
+      this.section = this.race.section;
+      return;
+    }
     if (cell.kind !== 'wall' && cell.section > this.section) this.section = cell.section;
     if (cell.kind === 'finish') {
       this.finish();
@@ -457,10 +522,10 @@ export class Game {
     const b = this.ball;
     log('fall', { x: b.x, z: b.z, section: this.section });
     this.world.restoreCrumble();
-    this.placeAt(this.section);
+    this.placeAt(this.race ? this.race.fell(this.section) : this.section);
     this.onCue?.('fall');
     // The clock keeps running: the wait is the price of falling.
-    this.startCountdown(true);
+    this.startCountdown(true, this.race ? RACE_RESPAWN_SECONDS : COUNTDOWN_SECONDS);
   }
 
   private placeAt(section: number): void {

@@ -24,6 +24,7 @@ function telemetrySink(): Plugin {
 }
 
 export default defineConfig({
+  base: './',
   plugins: [telemetrySink()],
   server: {
     host: '127.0.0.1', // adb reverse tunnels to IPv4; 'localhost' can bind IPv6 only on Windows

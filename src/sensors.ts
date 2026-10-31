@@ -1,13 +1,12 @@
-import { JumpDetector } from './jumpDetector';
 import { log } from './telemetry';
 
 const GRAVITY_SMOOTHING = 0.25;
 const FALLBACK_SMOOTHING = 0.08;
 const NEUTRAL_RATE = 3;
+const MIN_FUSED_GRAVITY = 5; // m/s2: real gravity is 9.8
 
 // Reads devicemotion. Device axes in portrait: x right, y towards the top edge, z out of the screen.
 export class Sensors {
-  readonly jump = new JumpDetector();
   active = false;
   hasLinear = false;
   hz = 0;
@@ -59,6 +58,8 @@ export class Sensors {
 
     const lin = e.acceleration;
     this.hasLinear = !!lin && lin.x !== null && lin.y !== null && lin.z !== null;
+    // Some phones' fused sensor spells of reporting everything as motion, leaving no gravity. Filter the raw signal then.
+    if (this.hasLinear && Math.hypot(incl.x - lin!.x!, incl.y - lin!.y!, incl.z - lin!.z!) < MIN_FUSED_GRAVITY) this.hasLinear = false;
     const lx = this.hasLinear ? lin!.x! : 0;
     const ly = this.hasLinear ? lin!.y! : 0;
     const lz = this.hasLinear ? lin!.z! : 0;
@@ -79,16 +80,10 @@ export class Sensors {
       this.gz += (tz - this.gz) * alpha;
     }
 
-    const ax = this.hasLinear ? lx : incl.x - this.gx;
-    const ay = this.hasLinear ? ly : incl.y - this.gy;
-    const az = this.hasLinear ? lz : incl.z - this.gz;
-
     this.steer = this.rawSteer() - this.neutralSteer;
     this.pitch = this.rawPitch() - this.neutralPitch;
 
     const now = performance.now();
-    this.jump.feed(now / 1000, ax, ay, az);
-
     this.count++;
     if (now - this.windowStart >= 1000) {
       this.hz = (this.count * 1000) / (now - this.windowStart);
@@ -98,7 +93,6 @@ export class Sensors {
 
     log('m', {
       i: e.interval,
-      a: [round(ax), round(ay), round(az)],
       g: [round(this.gx), round(this.gy), round(this.gz)],
     });
   };
