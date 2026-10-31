@@ -15,6 +15,8 @@ export interface WorldTheme {
   laser: string;
   magnet: string;
   orb: string;
+  loop: string;
+  music: string; // file under public/music, credited on the Attribution page
 }
 
 export interface BallTheme {
@@ -38,6 +40,7 @@ export const VALLEY: WorldTheme = {
     wall: ['#8f7fa8', '#83739c'],
     finish: ['#ffffff', '#4a3b52'],
     crumble: ['#efe0a8', '#e4d292'],
+    launch: ['#ff9e7d', '#f58a68'],
   },
   back: ['#ecc8b8', '#e7bdb3', '#e2c5d2', '#d6d2e0'],
   lightSky: '#fff6ee',
@@ -47,6 +50,8 @@ export const VALLEY: WorldTheme = {
   laser: '#ff3b5c',
   magnet: '#6fb7ff',
   orb: '#39c6ff',
+  loop: '#8f7fa8',
+  music: 'music/adagio-for-strings-kinda.mp3',
 };
 
 export const JOY_BALL: BallTheme = {

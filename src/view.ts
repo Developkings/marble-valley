@@ -1,10 +1,15 @@
 import * as THREE from 'three';
-import { CELL, type Cell, type Course, type Laser, type Magnet, type Piston } from './course';
+import { CELL, DIR_VEC, loopPoint, type Cell, type Course, type Laser, type Loop, type Magnet, type Piston } from './course';
 import type { Game } from './game';
 import { JOY_BALL, VALLEY, type BallTheme, type WorldTheme } from './themes';
 
 const BALL_RADIUS = 1.05;
-const BALL_GROWTH = 0.11;
+const BALL_MAX_GROWTH = 2; // extra size, as a multiple, at great height
+const BALL_GROWTH_HEIGHT = 7; // height that gives about two thirds of it
+const SHADOW_DRIFT = 0.3; // the sun is off to one side: the higher the marble, the further away its shadow
+const LOOP_SEGMENTS = 36;
+const LOOP_RAIL_THICK = 0.5;
+const LOOP_TIE_EVERY = 4;
 const CLIFF_DEPTH = 14;
 const CRUMBLE_DEPTH = 3;
 const CRUMBLE_DROP = 22;
@@ -44,6 +49,12 @@ const SPEED_FOR_FAST = 95;
 const LOOK_AHEAD_SECONDS = 0.32;
 const BALL_LOW_ON_SCREEN = 0.17; // fraction of camera distance the view centre sits above the ball
 const STREAK_FROM_SPEED = 26;
+
+interface Point3 {
+  x: number;
+  y: number;
+  z: number;
+}
 
 interface Drifter {
   x: number;
@@ -137,6 +148,7 @@ export class View {
     this.buildRings(course);
     this.buildOrbs(course);
     this.buildHazards(course);
+    this.buildLoops(course);
 
     const box = new THREE.BoxGeometry(1, 1, 1);
     this.back = new THREE.InstancedMesh(box, this.backMaterial, BACK_COUNT);
@@ -287,7 +299,7 @@ export class View {
   private buildChevrons(course: Course): void {
     const rows = new Map<string, Cell[]>();
     for (const c of course.list) {
-      if (c.kind !== 'boost' || !c.dir) continue;
+      if ((c.kind !== 'boost' && c.kind !== 'launch') || !c.dir) continue;
       const id = `${c.section}:${c.dir === 'N' ? c.iz : c.ix}`;
       if (!rows.has(id)) rows.set(id, []);
       rows.get(id)!.push(c);
@@ -310,7 +322,8 @@ export class View {
       const c = row[0];
       const x = row.reduce((sum, r) => sum + (r.ix + 0.5) * CELL, 0) / row.length;
       const z = row.reduce((sum, r) => sum + (r.iz + 0.5) * CELL, 0) / row.length;
-      dummy.position.set(x, c.h + 0.06, z);
+      // Flat on the middle of the block, lifted clear on a launch ramp's slope.
+      dummy.position.set(x, c.h + (c.sx + c.sz) * (CELL / 2) + (c.kind === 'launch' ? 0.45 : 0.06), z);
       dummy.rotation.set(0, c.dir === 'W' ? Math.PI / 2 : c.dir === 'E' ? -Math.PI / 2 : 0, 0);
       dummy.updateMatrix();
       chevrons.setMatrixAt(i++, dummy.matrix);
@@ -348,6 +361,55 @@ export class View {
     rings.visible = false;
     this.rings = rings;
     this.scene.add(rings);
+  }
+
+  // Two rails and a few ties, not a solid road: from above, a floor overhead would hide the marble.
+  private buildLoops(course: Course): void {
+    if (course.loops.length === 0) return;
+    const ties = Math.ceil(LOOP_SEGMENTS / LOOP_TIE_EVERY);
+    const parts = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshLambertMaterial({ color: this.theme.loop, flatShading: true }),
+      course.loops.length * (LOOP_SEGMENTS * 2 + ties),
+    );
+    parts.frustumCulled = false;
+    let i = 0;
+    for (const l of course.loops) {
+      const d = DIR_VEC[l.dir];
+      const side = new THREE.Vector3(-d.z, 0, d.x);
+      const radius = l.radius + BALL_RADIUS;
+      const from = { x: 0, y: 0, z: 0 };
+      const to = { x: 0, y: 0, z: 0 };
+      for (let s = 0; s < LOOP_SEGMENTS; s++) {
+        loopPoint(l, (s / LOOP_SEGMENTS) * Math.PI * 2, from, radius);
+        loopPoint(l, ((s + 1) / LOOP_SEGMENTS) * Math.PI * 2, to, radius);
+        i = this.placeLoopSegment(parts, i, l, from, to, side, s);
+      }
+    }
+    this.scene.add(parts);
+  }
+
+  private placeLoopSegment(parts: THREE.InstancedMesh, start: number, l: Loop, from: Point3, to: Point3, side: THREE.Vector3, s: number): number {
+    let i = start;
+    const a = new THREE.Vector3(from.x, from.y, from.z);
+    const b = new THREE.Vector3(to.x, to.y, to.z);
+    const length = a.distanceTo(b) + 0.2;
+    const mid = a.clone().add(b).multiplyScalar(0.5);
+    this.m.lookAt(a, b, side);
+    this.q.setFromRotationMatrix(this.m);
+    this.sc.set(LOOP_RAIL_THICK, LOOP_RAIL_THICK, length);
+    for (const edge of [-1, 1]) {
+      this.v.copy(mid).addScaledVector(side, (edge * l.width) / 2);
+      parts.setMatrixAt(i++, this.m.compose(this.v, this.q, this.sc));
+    }
+    if (s % LOOP_TIE_EVERY === 0) {
+      this.sc.set(l.width, LOOP_RAIL_THICK * 0.6, LOOP_RAIL_THICK * 0.8);
+      const along = b.clone().sub(a).normalize();
+      this.m.makeBasis(side, new THREE.Vector3().crossVectors(along, side), along);
+      this.q.setFromRotationMatrix(this.m);
+      parts.setMatrixAt(i++, this.m.compose(mid, this.q, this.sc));
+    }
+    return i;
   }
 
   private buildOrbs(course: Course): void {
@@ -516,11 +578,12 @@ export class View {
     const g = this.game;
     const b = g.ball;
     this.ball.position.set(b.x, b.y + BALL_RADIUS, b.z);
-    // From this high up, height barely shows on its own: grow the marble as it rises.
+    // From this high up, height barely shows on its own: grow the marble as it rises,
+    // measured from where it left the ground so crossing a gap doesn't change its size.
     const groundBelow = g.world.surface(b.x, b.z);
-    const inAir = g.state === 'flight' || g.state === 'jumpLift';
-    const height = inAir ? Math.max(0, b.y - Math.max(groundBelow, b.y - 12)) : 0;
-    this.ball.scale.setScalar(1 + height * BALL_GROWTH);
+    const height = Math.max(0, b.y - g.groundY);
+    const growth = BALL_MAX_GROWTH * (1 - Math.exp(-height / BALL_GROWTH_HEIGHT));
+    this.ball.scale.setScalar(1 + growth);
 
     const speed = b.speed;
     if (speed > 0.01) {
@@ -531,14 +594,15 @@ export class View {
 
     this.shadow.visible = groundBelow > -Infinity;
     if (this.shadow.visible) {
-      this.shadow.position.set(b.x, groundBelow + 0.05, b.z);
-      this.shadow.scale.setScalar(Math.max(0.3, 1 - (b.y - groundBelow) * 0.05));
+      const above = Math.max(0, b.y - groundBelow);
+      this.shadow.position.set(b.x + above * SHADOW_DRIFT, groundBelow + 0.05, b.z - above * SHADOW_DRIFT * 0.6);
+      this.shadow.scale.setScalar(Math.max(0.3, 1 - above * 0.05));
     }
 
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.012);
     this.chevronMaterial.color.setRGB(0.85 + pulse * 0.15, 1, 0.85 + pulse * 0.15);
 
-    this.updateCamera(dt, speed);
+    this.updateCamera(dt, g.speed);
     this.updateSpace(dt);
     this.updateStreaks(speed);
     this.updateLayers(speed);
@@ -562,10 +626,12 @@ export class View {
     }
 
     // Keep the marble low on screen with the road ahead of it above.
+    // In a loop it comes back on itself, and looking ahead would throw the view back and forth.
+    const ahead = g.state === 'loop' ? 0 : LOOK_AHEAD_SECONDS;
     this.wantTarget.set(
-      b.x + b.vx * LOOK_AHEAD_SECONDS,
-      b.y,
-      b.z + b.vz * LOOK_AHEAD_SECONDS - this.dist * BALL_LOW_ON_SCREEN,
+      b.x + b.vx * ahead,
+      g.state === 'loop' ? g.groundY : b.y,
+      b.z + b.vz * ahead - this.dist * BALL_LOW_ON_SCREEN,
     );
     const follow = this.snap ? 1 : 1 - Math.exp(-dt * 6);
     this.target.lerp(this.wantTarget, follow);
@@ -590,7 +656,7 @@ export class View {
 
   private updateSpace(dt: number): void {
     const s = this.game.state;
-    const inSpace = s === 'jumpWindow' || s === 'jumpLift' || s === 'flight';
+    const inSpace = s === 'jumpWindow' || s === 'flight';
     this.spaceMix += ((inSpace ? 1 : 0) - this.spaceMix) * (1 - Math.exp(-dt * 6));
     this.bg.copy(this.sky).lerp(this.jumpSpace, this.spaceMix);
     // Towers sink into the dark so nothing competes with the marble's arc.

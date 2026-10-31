@@ -1,6 +1,6 @@
 export const CELL = 2;
 
-export type Kind = 'plain' | 'ramp' | 'boost' | 'fast' | 'maze' | 'pad' | 'wall' | 'finish' | 'crumble';
+export type Kind = 'plain' | 'ramp' | 'boost' | 'fast' | 'maze' | 'pad' | 'wall' | 'finish' | 'crumble' | 'launch';
 export type Dir = 'N' | 'W' | 'E';
 
 // The camera faces -z, so N is straight up the screen, W is left and E is right.
@@ -56,13 +56,37 @@ export interface Magnet extends Point {
 
 export type Hazard = Piston | Laser | Magnet;
 
+// A vertical loop. The marble enters at the bottom and comes back to the bottom shifted sideways,
+// so the lane out runs beside the lane in rather than through it.
+export interface Loop extends Point {
+  radius: number; // world units
+  width: number; // world units across the lane in
+  dir: Dir;
+  shift: number; // world units to the right of travel, covered on the way down
+  section: number;
+}
+
+// Where on a loop angle a is: 0 at the bottom going in, PI at the top, 2 PI at the bottom coming out.
+export function loopPoint(l: Loop, a: number, out: Point, radius = l.radius): void {
+  const d = DIR_VEC[l.dir];
+  const along = radius * Math.sin(a);
+  const k = Math.max(0, Math.min(1, (a - Math.PI) / Math.PI));
+  const across = l.shift * k * k * (3 - 2 * k);
+  out.x = l.x + d.x * along - d.z * across;
+  out.y = l.y + radius * (1 - Math.cos(a));
+  out.z = l.z + d.z * along + d.x * across;
+}
+
 // A course is plain JSON: a list of building steps, so it can be saved, edited and sent to another player.
 // Hazards are placed relative to the end of the last piece: along is back (negative) or ahead
 // in the travel direction, across is to the right of it, both in cells.
 export type CourseOp =
   | { op: 'backstop'; width: number }
-  | { op: 'run'; dir: Dir; len: number; width: number; rise?: number; kind?: Kind; orbs?: number; orbLane?: number }
+  // sameSection keeps the previous respawn point, for pieces that are no use from a standing start.
+  | { op: 'run'; dir: Dir; len: number; width: number; rise?: number; kind?: Kind; orbs?: number; orbLane?: number; sameSection?: boolean }
   | { op: 'drop'; amount: number }
+  | { op: 'gap'; len: number }
+  | { op: 'loop'; radius: number; shift: number; orb?: boolean }
   | { op: 'maze'; rows: string[] }
   | { op: 'rally'; offsets: number[]; space: number; size?: number }
   | { op: 'piston'; along: number; across: number; size: number; period: number; phase?: number }
@@ -89,6 +113,7 @@ export class Course {
   readonly hops = new Map<number, Hop>();
   readonly orbs: Point[] = [];
   readonly hazards: Hazard[] = [];
+  readonly loops: Loop[] = [];
 
   private cx = 0;
   private cz = 0;
@@ -118,6 +143,14 @@ export class Course {
       case 'drop':
         this.h -= step.amount;
         return;
+      case 'gap': {
+        const d = DIR_VEC[this.dir ?? 'N'];
+        this.cx += d.x * step.len;
+        this.cz += d.z * step.len;
+        return;
+      }
+      case 'loop':
+        return this.loop(step.radius, step.shift, step.orb ?? false);
       case 'maze':
         return this.maze(step.rows);
       case 'rally':
@@ -164,7 +197,9 @@ export class Course {
     if (this.dir && this.dir !== dir) this.corner(dir, width);
     this.dir = dir;
     this.width = width;
-    const section = this.addCheckpoint((this.cx + 0.5) * CELL, this.h, (this.cz + 0.5) * CELL);
+    const section = s.sameSection
+      ? this.checkpoints.length - 1
+      : this.addCheckpoint((this.cx + 0.5) * CELL, this.h, (this.cz + 0.5) * CELL);
     const d = DIR_VEC[dir];
 
     if (this.lastPad >= 0) {
@@ -211,6 +246,33 @@ export class Course {
     this.cx += d.x * len;
     this.cz += d.z * len;
     this.h += rise;
+  }
+
+  // Starts where the lane in stops, and leaves the next piece starting beside it.
+  private loop(radiusCells: number, shiftCells: number, orb: boolean): void {
+    const dir = this.dir ?? 'N';
+    const d = DIR_VEC[dir];
+    const end = this.placed(-0.5, 0);
+    // An even-width lane is centred on a block edge, not on the middle of a block.
+    const centre = (this.width / 2 - Math.floor(this.width / 2)) * CELL;
+    const loop: Loop = {
+      x: d.x !== 0 ? end.x : this.cx * CELL + centre,
+      y: this.h,
+      z: d.z !== 0 ? end.z : this.cz * CELL + centre,
+      radius: radiusCells * CELL,
+      width: this.width * CELL,
+      dir,
+      shift: shiftCells * CELL,
+      section: this.checkpoints.length - 1,
+    };
+    this.loops.push(loop);
+    if (orb) {
+      const top = { x: 0, y: 0, z: 0 };
+      loopPoint(loop, Math.PI, top);
+      this.orbs.push(top);
+    }
+    this.cx -= d.z * shiftCells;
+    this.cz += d.x * shiftCells;
   }
 
   // Walled area read from a map, first string is the far end. # wall, . floor,
@@ -319,7 +381,10 @@ export const FIRST_COURSE: CourseData = {
     { op: 'run', dir: 'N', len: 4, width: 12, kind: 'boost' },
     { op: 'run', dir: 'N', len: 44, width: 10, kind: 'fast', rise: -10, orbs: 5, orbLane: -3 },
     { op: 'run', dir: 'N', len: 4, width: 10, kind: 'boost' },
-    { op: 'run', dir: 'N', len: 44, width: 8, kind: 'fast', rise: -12, orbs: 5, orbLane: 2 },
+    { op: 'run', dir: 'N', len: 6, width: 10, kind: 'launch', rise: 3.6, sameSection: true },
+    { op: 'gap', len: 14 },
+    { op: 'drop', amount: 6 },
+    { op: 'run', dir: 'N', len: 60, width: 10, kind: 'fast', rise: -12, orbs: 5, orbLane: 2 },
     { op: 'run', dir: 'N', len: 16, width: 8, kind: 'maze' },
     { op: 'run', dir: 'E', len: 8, width: 8 },
     { op: 'run', dir: 'N', len: 12, width: 8 },
@@ -351,6 +416,9 @@ export const FIRST_COURSE: CourseData = {
     },
     { op: 'run', dir: 'N', len: 8, width: 6 },
     { op: 'rally', offsets: [0, 8, -8, 8], space: 10 },
+    { op: 'run', dir: 'N', len: 12, width: 6, kind: 'fast' },
+    { op: 'run', dir: 'N', len: 4, width: 6, kind: 'boost' },
+    { op: 'loop', radius: 6, shift: 6, orb: true },
     { op: 'run', dir: 'N', len: 4, width: 10, kind: 'boost' },
     { op: 'run', dir: 'N', len: 56, width: 10, kind: 'fast', rise: -18, orbs: 6, orbLane: -3 },
     { op: 'run', dir: 'N', len: 16, width: 6, kind: 'crumble' },
@@ -360,7 +428,10 @@ export const FIRST_COURSE: CourseData = {
     { op: 'piston', along: -18, across: -2, size: 4, period: 3 },
     { op: 'piston', along: -8, across: 2, size: 4, period: 3, phase: 0.5 },
     { op: 'run', dir: 'N', len: 4, width: 8, kind: 'boost' },
-    { op: 'run', dir: 'N', len: 36, width: 8, kind: 'fast' },
+    { op: 'run', dir: 'N', len: 6, width: 8, kind: 'launch', rise: 3.6, sameSection: true },
+    { op: 'gap', len: 14 },
+    { op: 'drop', amount: 6 },
+    { op: 'run', dir: 'N', len: 56, width: 8, kind: 'fast' },
     { op: 'run', dir: 'N', len: 3, width: 8, kind: 'finish' },
     { op: 'run', dir: 'N', len: 18, width: 8 },
   ],

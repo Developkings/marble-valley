@@ -1,6 +1,7 @@
 import type { Cue } from './game';
 
-// Every sound is synthesized, so the app carries no audio files.
+// Every sound effect is synthesized; the only audio file is the world's music.
+const SOUNDS_GAIN = 0.7;
 const ROLL_MAX_GAIN = 0.16;
 const ROLL_FULL_SPEED = 110;
 
@@ -10,9 +11,61 @@ export class Sound {
   private rollGain: GainNode | null = null;
   private rollFilter: BiquadFilterNode | null = null;
   private noise: AudioBuffer | null = null;
+  private music: HTMLAudioElement;
+  private soundsVolume = 1;
+  private musicOn = true;
+
+  constructor(musicFile: string) {
+    this.music = new Audio(musicFile);
+    this.music.loop = true;
+  }
+
+  // Both from 0 to 1.
+  setVolumes(music: number, sounds: number): void {
+    this.music.volume = music;
+    this.soundsVolume = sounds;
+    if (this.master) this.master.gain.value = SOUNDS_GAIN * sounds;
+  }
+
+  // The app may be out of sight but still alive, and must go quiet with it.
+  setHidden(hidden: boolean): void {
+    if (hidden) {
+      this.music.pause();
+      void this.ctx?.suspend();
+    } else if (this.ctx) {
+      void this.ctx.resume();
+      this.playMusic();
+    }
+  }
+
+  private playMusic(): void {
+    if (!this.musicOn) return;
+    // Missing or blocked music only means a quieter game.
+    this.music.play().catch(() => {});
+  }
+
+  setMusicOn(on: boolean): void {
+    this.musicOn = on;
+    if (!on) this.music.pause();
+    else if (this.ctx) this.playMusic();
+  }
+
+  // Swaps the track. False if audio is already unlocked and this file won't play.
+  async setMusic(src: string): Promise<boolean> {
+    this.music.pause();
+    this.music.src = src;
+    if (!this.ctx || !this.musicOn) return true;
+    try {
+      await this.music.play();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // Browsers only allow audio to start from a tap.
   unlock(): void {
+    if (this.music.paused) this.playMusic();
     if (this.ctx) {
       void this.ctx.resume();
       return;
@@ -21,7 +74,7 @@ export class Sound {
       const ctx = new AudioContext();
       this.ctx = ctx;
       this.master = ctx.createGain();
-      this.master.gain.value = 0.7;
+      this.master.gain.value = SOUNDS_GAIN * this.soundsVolume;
       this.master.connect(ctx.destination);
 
       const length = ctx.sampleRate * 2;
@@ -82,6 +135,10 @@ export class Sound {
         return this.tone(1040, 1040, 0.26, 0.2);
       case 'fall':
         return this.tone(500, 90, 0.5, 0.2);
+      case 'launch':
+        return this.tone(260, 1100, 0.35, 0.22);
+      case 'loop':
+        return this.tone(330, 660, 0.7, 0.14, 'triangle');
     }
   }
 

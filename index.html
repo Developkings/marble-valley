@@ -27,6 +27,22 @@
       .controls { position: fixed; left: 0; right: 0; bottom: 0; padding: 0 16px max(16px, env(safe-area-inset-bottom)); display: flex; justify-content: space-between; pointer-events: none; }
       .controls[hidden] { display: none; }
       .controls button { pointer-events: auto; min-width: 0; padding: 10px 16px; font-size: 15px; background: rgba(255, 248, 240, 0.75); }
+      #jumpCue { position: fixed; left: 0; right: 0; top: 32%; display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none; }
+      #jumpCue[hidden] { display: none; }
+      #jumpArrow { width: 110px; height: 110px; fill: #ffffff; stroke: #1b1247; stroke-width: 3; }
+      #jumpCue.land #jumpArrow { fill: #f9c74f; }
+      #jumpTimer { width: 160px; height: 10px; border: 1px solid #ffffff; }
+      #jumpTimerFill { height: 100%; background: #ffffff; transform-origin: left; }
+      .page { background: #f3d9c9; justify-content: flex-start; overflow-y: auto; touch-action: pan-y; padding-top: max(24px, env(safe-area-inset-top)); }
+      .page h2 { font-weight: normal; font-size: 28px; letter-spacing: 2px; margin: 8px 0 0; }
+      .page h3 { font-weight: normal; font-size: 18px; letter-spacing: 1px; margin: 12px 0 0; }
+      .setting { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 320px; }
+      .setting input { width: 100%; accent-color: #4a3b52; height: 32px; touch-action: none; }
+      .credit { max-width: 340px; line-height: 1.4; font-size: 15px; }
+      .credit a { color: inherit; }
+      .credit small { display: block; opacity: 0.8; }
+      #mitText { max-width: 340px; font-size: 11px; line-height: 1.4; text-align: left; white-space: pre-line; opacity: 0.8; }
+      #recordsList { font-size: 18px; font-variant-numeric: tabular-nums; line-height: 1.7; }
     </style>
   </head>
   <body>
@@ -37,15 +53,53 @@
     </div>
     <div class="controls" id="controls" hidden>
       <button id="restart">Restart</button>
+      <button class="musicToggle"></button>
       <button id="toMenu">Menu</button>
     </div>
     <div id="callout"></div>
+    <div id="jumpCue" hidden>
+      <svg id="jumpArrow" viewBox="-50 -50 100 100"><path d="M0 -44 L34 -6 L14 -6 L14 40 L-14 40 L-14 -6 L-34 -6 Z" /></svg>
+      <div id="jumpTimer"><div id="jumpTimerFill"></div></div>
+    </div>
 
     <div class="panel" id="menu">
       <h1>Marble Valley</h1>
       <p id="menuText">Hold the phone comfortably. During the countdown, that angle becomes neutral.</p>
       <button id="play">Play</button>
+      <button class="musicToggle"></button>
+      <button id="openRecords">Records</button>
+      <button id="openSettings">Settings</button>
       <button id="openLab">Sensor Lab</button>
+    </div>
+
+    <div class="panel page" id="records" hidden>
+      <h2>Records</h2>
+      <div id="recordsList"></div>
+      <button id="closeRecords">Back</button>
+    </div>
+
+    <div class="panel page" id="settings" hidden>
+      <h2>Settings</h2>
+      <label class="setting">Music<input type="range" id="setMusic" min="0" max="1" step="0.05" /></label>
+      <div class="setting">Playing: <span id="musicName"></span></div>
+      <button id="chooseMusic">Use your own music</button>
+      <button id="defaultMusic" hidden>Back to default music</button>
+      <input type="file" id="musicFile" accept="audio/*" hidden />
+      <label class="setting">Sounds<input type="range" id="setSounds" min="0" max="1" step="0.05" /></label>
+      <label class="setting">Tilt sensitivity<input type="range" id="setTilt" min="0" max="1" step="0.05" /></label>
+      <button id="openCredits">Attribution</button>
+      <button id="closeSettings">Back</button>
+    </div>
+
+    <div class="panel page" id="credits" hidden>
+      <h2>Attribution</h2>
+      <h3>Music</h3>
+      <div id="musicCredits"></div>
+      <p class="credit"><small>This is the game's default music. Music you add yourself stays on your phone and is not shared.</small></p>
+      <h3>Software</h3>
+      <div id="softwareCredits"></div>
+      <div id="mitText"></div>
+      <button id="closeCredits">Back</button>
     </div>
 
     <div class="panel" id="lab" hidden>

@@ -19,10 +19,13 @@ const BOOST_PUSH = 50;
 const BURST_PUSH = 90;
 const HARD_LANDING = -14;
 const LOUD_IMPACT = 20;
+const LAUNCH_POP = 1.5; // more lift than the ramp's angle alone, so a jump reads from high above
+const LAUNCH_MAX_LIFT = 24;
+const LAUNCH_MAX_SPEED = 70; // keeps the landing within reach of the track at any approach speed
 
 export const GRAVITY = GRAVITY_ACCEL;
 
-export type MarbleEvent = 'boost' | 'wall' | 'crumble';
+export type MarbleEvent = 'boost' | 'wall' | 'crumble' | 'launch';
 
 // One ball's physics. Knows nothing about sensors or players: it takes a force and a world,
 // so a second ball on the same course is just a second Marble.
@@ -37,6 +40,7 @@ export class Marble {
   burstLeft = 0;
   landedHard = false;
   landedNow = false;
+  launched = false; // in the air off a launch ramp
   private inBoost = false;
   private field = { x: 0, z: 0 };
 
@@ -56,6 +60,7 @@ export class Marble {
     this.grounded = true;
     this.inBoost = false;
     this.burstLeft = 0;
+    this.launched = false;
   }
 
   step(dt: number, world: World, forceX: number, forceZ: number, capSpeed: boolean): void {
@@ -71,7 +76,7 @@ export class Marble {
       this.vx += (forceX * THRUST + this.field.x - cell.sx * GRAVITY_ACCEL - this.vx * drag) * dt;
       this.vz += (forceZ * THRUST + this.field.z - cell.sz * GRAVITY_ACCEL - this.vz * drag) * dt;
 
-      if (cell.dir && (cell.kind === 'boost' || cell.kind === 'fast')) {
+      if (cell.dir && (cell.kind === 'boost' || cell.kind === 'fast' || cell.kind === 'launch')) {
         const d = DIR_VEC[cell.dir];
         const push = cell.kind === 'boost' ? BOOST_PUSH : FAST_PUSH;
         this.vx += d.x * push * dt;
@@ -113,6 +118,7 @@ export class Marble {
         this.vy = 0;
       } else {
         this.grounded = false;
+        if (cell?.kind === 'launch') this.launch(Math.abs(cell.sx) + Math.abs(cell.sz));
       }
     } else if (this.y <= ground && this.vy <= 0) {
       this.landedHard = this.vy < HARD_LANDING;
@@ -121,6 +127,18 @@ export class Marble {
       this.vy = 0;
       this.grounded = true;
     }
+  }
+
+  private launch(slope: number): void {
+    const speed = this.speed;
+    if (speed > LAUNCH_MAX_SPEED) {
+      this.vx *= LAUNCH_MAX_SPEED / speed;
+      this.vz *= LAUNCH_MAX_SPEED / speed;
+    }
+    this.vy = Math.min(LAUNCH_MAX_LIFT, this.speed * slope * LAUNCH_POP);
+    this.burstLeft = 0;
+    this.launched = true;
+    this.onEvent?.('launch');
   }
 
   private applyBurst(dt: number, fallback: 'N' | 'W' | 'E' | undefined): void {

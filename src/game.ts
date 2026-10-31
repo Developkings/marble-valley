@@ -1,43 +1,35 @@
-import { Course, DIR_VEC, FIRST_COURSE, type Hop } from './course';
-import type { Gesture } from './jumpDetector';
+import { Course, DIR_VEC, FIRST_COURSE, loopPoint, type Hop, type Loop } from './course';
 import { GRAVITY, Marble } from './marble';
 import type { Sensors } from './sensors';
 import { log } from './telemetry';
 import { World } from './world';
 
-export type State = 'menu' | 'countdown' | 'run' | 'jumpWindow' | 'jumpLift' | 'flight' | 'finished';
-export type Band = 'miss' | 'short' | 'good' | 'perfect' | 'long';
-export type Cue = 'boost' | 'wall' | 'crumble' | 'orb' | 'burst' | 'catch' | 'hit' | 'land' | 'softLand' | 'tick' | 'go' | 'fall';
+export type State = 'menu' | 'countdown' | 'run' | 'loop' | 'jumpWindow' | 'flight' | 'finished';
+export type Cue = 'boost' | 'wall' | 'crumble' | 'orb' | 'burst' | 'catch' | 'hit' | 'land' | 'softLand' | 'tick' | 'go' | 'fall' | 'launch' | 'loop';
 
 const DEG = Math.PI / 180;
-const TILT_FULL = 22 * DEG;
+const DEFAULT_TILT_FULL = 22 * DEG;
 const DEADZONE = 2 * DEG;
+
+const LOOP_TRIGGER = 1.5; // world units before the end of the lane in, ahead of falling off it
 
 const STEP = 1 / 120;
 
-const WINDOW_SECONDS = 4;
+const WINDOW_SECONDS = 1;
 const CATCH_RATE = 9;
 const HOP_SECONDS = 1.05;
-const ARC_HEIGHT = 4.7; // apex of a hop's parabola under GRAVITY and HOP_SECONDS
-const IDEAL_HIT_CM = 20;
-const FOLLOW_RATE = 25;
-const MIN_FALL_SECONDS = 0.3;
-const HIT_GRACE_SECONDS = 0.25; // the pad's catch buzz shakes the phone; don't read that as a hit
-const IGNORE_BELOW_CM = 4; // tremor, not a swing
+const TILT_TO_ACT = 0.5; // how far over the phone must be, of full tilt, to count as a move
+const TILT_CHANGE_TO_ACT = 0.4; // and how far from how it was held on arriving
+const DIRECTION_MATCH = Math.SQRT1_2; // within 45 degrees of the arrow
+const LATE_REACH = 0.3; // too late: the jump leaves the pad but never gets near the next one
+const BOUNCE_UP = 10; // landing without tilting back: bounces on, off the end of a pad
 const COUNTDOWN_SECONDS = 3;
 const EXIT_SPEED = 55;
-const EXIT_SPEED_PER_PERFECT = 12;
+const EXIT_SPEED_PER_CLEAN_HOP = 12;
 
 const ORB_REACH = 2.6;
 const ORB_VALUE = 0.2;
 const BURST_SECONDS_FULL = 2.2;
-
-const SHORT_BELOW_CM = 13;
-const PERFECT_FROM_CM = 16;
-const PERFECT_TO_CM = 25;
-const LONG_ABOVE_CM = 33;
-const REACH: Record<Band, number> = { miss: 0.3, short: 0.55, good: 1, perfect: 1, long: 1.4 };
-const LABEL: Record<Band, string> = { miss: 'MISSED', short: 'TOO SHORT', good: 'GOOD', perfect: 'PERFECT', long: 'TOO FAR' };
 
 const FALL_DEPTH = 34;
 
@@ -49,21 +41,29 @@ export class Game {
   meter = 0;
   state: State = 'menu';
   time = 0;
-  lastBand: Band | null = null;
-  lastCm = 0;
-  // Tilt in -1..1 for the view's parallax; zero while the phone is being swung.
+  // Tilt in -1..1, for the view's parallax and for jumping.
   tiltX = 0;
   tiltY = 0;
+  tiltFull = DEFAULT_TILT_FULL; // tilt that gives full force
+  groundY = 0; // height of the ground last rolled on, what height in the air is measured from
 
+  private loop: Loop | null = null;
+  private loopAngle = 0;
+  private loopSpeed = 0;
+  private loopOffset = { x: 0, z: 0 };
+  private loopAt = { x: 0, y: 0, z: 0 };
   private accumulator = 0;
   private section = 0;
-  private lastGroundY = 0;
   private windowLeft = 0;
-  private windowOpenedAt = 0;
-  private padY = 0;
+  private heldX = 0; // tilt on arriving at the pad, so simply holding it or letting go doesn't jump
+  private heldY = 0;
   private hop: Hop | null = null;
-  private perfects = 0;
-  private hitProgress = 0; // 0 on the pad, 1 at the apex: how far the hand has carried the marble
+  private hopDirX = 0; // unit direction of the hop, in tilt terms: x right, y up the screen
+  private hopDirY = 0;
+  private flightOk = false; // a correct jump, still needing the tilt back to land
+  private flightFailed = false; // a wrong or late jump, which can only end in a fall
+  private tiltedBack = false;
+  private cleanHops = 0;
   private countdownLeft = 0;
   private countdownCostsTime = false;
   private burning = false;
@@ -73,13 +73,28 @@ export class Game {
   onFinish: ((time: number) => void) | null = null;
 
   constructor(private sensors: Sensors) {
-    sensors.jump.onGesture = (g) => this.acceptGesture(g);
     this.ball.onEvent = (e) => this.onCue?.(e);
     this.placeAt(0);
   }
 
   get speed(): number {
-    return this.ball.speed;
+    return this.state === 'loop' ? Math.abs(this.loopSpeed) : this.ball.speed;
+  }
+
+  // What to show the player: which way to tilt (radians clockwise from up the screen) and the time left for it.
+  get jumpCue(): { angle: number; timeLeft: number; landing: boolean } | null {
+    if (this.state === 'jumpWindow') {
+      return { angle: Math.atan2(this.hopDirX, this.hopDirY), timeLeft: Math.max(0, this.windowLeft / WINDOW_SECONDS), landing: false };
+    }
+    if (this.state === 'flight' && this.flightOk && !this.tiltedBack) {
+      return { angle: Math.atan2(-this.hopDirX, -this.hopDirY), timeLeft: 1, landing: true };
+    }
+    return null;
+  }
+
+  // Back from the phone being put down or the app left: tilt has to be found again.
+  realign(): void {
+    if (this.state === 'run') this.startCountdown(false);
   }
 
   begin(): void {
@@ -87,8 +102,7 @@ export class Game {
     this.placeAt(0);
     this.time = 0;
     this.accumulator = 0;
-    this.lastBand = null;
-    this.perfects = 0;
+    this.cleanHops = 0;
     this.meter = 0;
     this.burning = false;
     this.orbTaken.fill(false);
@@ -103,11 +117,6 @@ export class Game {
     this.tiltX = 0;
     this.tiltY = 0;
     log('run', { event: 'menu' });
-  }
-
-  // For desktop testing without a phone.
-  simulateGesture(cm: number): void {
-    if (this.state === 'jumpWindow') this.launch(cm);
   }
 
   // A tap spends the whole meter on one burst of speed.
@@ -158,22 +167,24 @@ export class Game {
     }
     this.time += dt;
 
-    const swinging = this.state !== 'run';
-    this.tiltX = swinging ? 0 : keyX !== 0 ? keyX : clampUnit(this.sensors.steer / TILT_FULL);
-    this.tiltY = swinging ? 0 : keyY !== 0 ? keyY : clampUnit(this.sensors.pitch / TILT_FULL);
+    this.tiltX = keyX !== 0 ? keyX : clampUnit(this.sensors.steer / this.tiltFull);
+    this.tiltY = keyY !== 0 ? keyY : clampUnit(this.sensors.pitch / this.tiltFull);
 
-    if (this.state === 'jumpWindow' || this.state === 'jumpLift') {
-      this.updateJumpInput(dt);
+    if (this.state === 'jumpWindow') {
+      this.updateJumpWindow(dt);
       return;
     }
+    if (this.state === 'flight' && this.flightOk && this.tiltsAgainstHop()) this.tiltedBack = true;
 
-    // The arc of a hit is the player's to watch, not to steer: the phone is still moving.
-    const forceX = swinging ? 0 : keyX !== 0 ? keyX : shape(this.sensors.steer);
-    const forceZ = swinging ? 0 : -(keyY !== 0 ? keyY : shape(this.sensors.pitch));
+    // A jump's arc is set when it leaves the pad: tilting in the air is for landing, not steering.
+    const free = this.state === 'run';
+    const forceX = !free ? 0 : keyX !== 0 ? keyX : shape(this.sensors.steer, this.tiltFull);
+    const forceZ = !free ? 0 : -(keyY !== 0 ? keyY : shape(this.sensors.pitch, this.tiltFull));
 
     this.accumulator += dt;
-    while (this.accumulator >= STEP && (this.state === 'run' || this.state === 'flight')) {
-      this.step(forceX, forceZ);
+    while (this.accumulator >= STEP && (this.state === 'run' || this.state === 'flight' || this.state === 'loop')) {
+      if (this.state === 'loop') this.stepLoop();
+      else this.step(forceX, forceZ);
       this.accumulator -= STEP;
     }
     if (this.burning) {
@@ -187,8 +198,10 @@ export class Game {
     b.step(STEP, this.world, forceX, forceZ, this.state === 'run');
 
     if (b.landedNow) {
-      if (b.landedHard) this.onCue?.(this.state === 'flight' ? 'land' : 'softLand');
+      if (b.landedHard) this.onCue?.(this.state === 'flight' || b.launched ? 'land' : 'softLand');
+      b.launched = false;
       if (this.state === 'flight') this.endFlight();
+      if (this.state === 'countdown') return;
     }
 
     this.collectOrbs();
@@ -198,11 +211,95 @@ export class Game {
       return;
     }
     if (b.grounded) {
-      this.lastGroundY = b.y;
+      this.groundY = b.y;
       this.onGround();
-    } else if (b.y < this.lastGroundY - FALL_DEPTH) {
+      if (this.state === 'run') this.enterLoopIfAtOne();
+    } else if (b.y < this.groundY - FALL_DEPTH) {
       this.respawn();
     }
+  }
+
+  private enterLoopIfAtOne(): void {
+    const b = this.ball;
+    for (const l of this.course.loops) {
+      const d = DIR_VEC[l.dir];
+      const along = (b.x - l.x) * d.x + (b.z - l.z) * d.z;
+      const across = (b.x - l.x) * -d.z + (b.z - l.z) * d.x;
+      if (Math.abs(across) > l.width / 2 || along < -LOOP_TRIGGER || along > LOOP_TRIGGER || Math.abs(b.y - l.y) > 1) continue;
+      const speed = b.vx * d.x + b.vz * d.z;
+      if (speed <= 0) continue;
+      this.loop = l;
+      this.loopAngle = 0;
+      this.loopSpeed = speed;
+      this.loopOffset.x = -d.z * across;
+      this.loopOffset.z = d.x * across;
+      this.state = 'loop';
+      this.onCue?.('loop');
+      log('loop', { event: 'enter', speed });
+      return;
+    }
+  }
+
+  // On the ring only its angle is free: gravity slows the climb and gives it back on the way down.
+  // Too slow to stay pressed against the top and the marble drops off; too slow to reach
+  // halfway up and it just rolls back down the way it came.
+  private stepLoop(): void {
+    const l = this.loop!;
+    const b = this.ball;
+    const r = l.radius;
+    this.loopSpeed -= GRAVITY * Math.sin(this.loopAngle) * STEP;
+    this.loopAngle += (this.loopSpeed / r) * STEP;
+    const fromX = b.x;
+    const fromY = b.y;
+    const fromZ = b.z;
+
+    const d = DIR_VEC[l.dir];
+    if (this.loopAngle <= 0) {
+      this.leaveLoop(0);
+      b.x = l.x + this.loopOffset.x - d.x * LOOP_TRIGGER * 2;
+      b.z = l.z + this.loopOffset.z - d.z * LOOP_TRIGGER * 2;
+      b.vx = d.x * this.loopSpeed;
+      b.vz = d.z * this.loopSpeed;
+      return;
+    }
+    if (this.loopAngle >= Math.PI * 2) {
+      this.leaveLoop(Math.PI * 2);
+      b.x += d.x * LOOP_TRIGGER;
+      b.z += d.z * LOOP_TRIGGER;
+      b.vx = d.x * this.loopSpeed;
+      b.vz = d.z * this.loopSpeed;
+      log('loop', { event: 'exit', speed: this.loopSpeed });
+      return;
+    }
+
+    loopPoint(l, this.loopAngle, this.loopAt);
+    b.x = this.loopAt.x + this.loopOffset.x;
+    b.y = this.loopAt.y;
+    b.z = this.loopAt.z + this.loopOffset.z;
+    b.vx = (b.x - fromX) / STEP;
+    b.vz = (b.z - fromZ) / STEP;
+    this.collectOrbs();
+
+    const pressing = (this.loopSpeed * this.loopSpeed) / r + GRAVITY * Math.cos(this.loopAngle);
+    if (pressing < 0) {
+      b.vy = (b.y - fromY) / STEP;
+      this.state = 'run';
+      b.grounded = false;
+      this.loop = null;
+      log('loop', { event: 'fell', angle: this.loopAngle });
+    }
+  }
+
+  private leaveLoop(angle: number): void {
+    const b = this.ball;
+    loopPoint(this.loop!, angle, this.loopAt);
+    b.x = this.loopAt.x + this.loopOffset.x;
+    b.y = this.loopAt.y;
+    b.z = this.loopAt.z + this.loopOffset.z;
+    b.vy = 0;
+    b.grounded = true;
+    this.loop = null;
+    this.state = 'run';
   }
 
   private collectOrbs(): void {
@@ -222,14 +319,33 @@ export class Game {
 
   private endFlight(): void {
     const b = this.ball;
+    // A failed jump is a fall, even where it happens to come down on the course.
+    if (this.flightFailed) {
+      this.respawn();
+      return;
+    }
+    // Forgot to tilt back: nothing stops it, and it bounces on past where it should have landed.
+    if (this.flightOk && !this.tiltedBack) {
+      this.flightOk = false;
+      b.grounded = false;
+      b.vy = BOUNCE_UP;
+      this.onCallout?.('TILT BACK', 'bad');
+      log('jump', { event: 'bounce', x: b.x, z: b.z });
+      return;
+    }
+    if (this.flightOk) {
+      this.cleanHops++;
+      this.onCallout?.('LANDED', 'good');
+    }
     this.state = 'run';
     const cell = this.world.cellAt(b.x, b.z);
     const dir = DIR_VEC[cell?.dir ?? 'N'];
-    // Off the last pad, every perfect hit in the rally comes back as speed.
-    const exit = cell?.kind === 'pad' ? 0 : EXIT_SPEED + this.perfects * EXIT_SPEED_PER_PERFECT;
+    // Off the last pad, every clean hop in the rally comes back as speed.
+    const exit = cell?.kind === 'pad' ? 0 : EXIT_SPEED + this.cleanHops * EXIT_SPEED_PER_CLEAN_HOP;
     b.vx = dir.x * exit;
     b.vz = dir.z * exit;
-    log('jump', { event: 'land', x: b.x, z: b.z, exit });
+    log('jump', { event: 'land', x: b.x, z: b.z, exit, clean: this.flightOk });
+    this.flightOk = false;
   }
 
   private onGround(): void {
@@ -243,97 +359,98 @@ export class Game {
     }
   }
 
+  // A marble on a pad has one second to go the way the arrow points.
   private openJumpWindow(section: number): void {
     const hop = this.course.hops.get(section);
     if (!hop) return;
     this.hop = hop;
-    this.padY = this.ball.y;
+    const dx = hop.to.x - hop.from.x;
+    const dz = hop.to.z - hop.from.z;
+    const length = Math.hypot(dx, dz);
+    this.hopDirX = dx / length;
+    this.hopDirY = -dz / length;
+    this.heldX = this.tiltX;
+    this.heldY = this.tiltY;
     this.ball.vx = 0;
     this.ball.vz = 0;
     this.state = 'jumpWindow';
     this.windowLeft = WINDOW_SECONDS;
-    this.windowOpenedAt = performance.now() / 1000 + HIT_GRACE_SECONDS;
-    this.hitProgress = 0;
-    this.onCallout?.('HIT', 'neutral');
     this.onCue?.('catch');
     log('jump', { event: 'window', section });
   }
 
-  private updateJumpInput(dt: number): void {
+  private updateJumpWindow(dt: number): void {
     const hop = this.hop!;
-    const detector = this.sensors.jump;
-    if (detector.moving && detector.startTime >= this.windowOpenedAt) {
-      this.state = 'jumpLift';
-      this.followHand(hop, detector.liveCm, dt);
-      return;
-    }
-    // The pad catches the marble and holds it until the player swings.
     const pull = 1 - Math.exp(-dt * CATCH_RATE);
     this.ball.x += (hop.from.x - this.ball.x) * pull;
     this.ball.z += (hop.from.z - this.ball.z) * pull;
-    if (this.state === 'jumpWindow') {
-      this.windowLeft -= dt;
-      if (this.windowLeft <= 0) this.launch(0);
-    }
-  }
 
-  // While the hand moves, the marble climbs the first half of the hop's arc in step with it:
-  // the ideal swing distance puts it at the apex, and it only falls once the hand has stopped.
-  private followHand(hop: Hop, liveCm: number, dt: number): void {
-    const wanted = Math.min(1, liveCm / IDEAL_HIT_CM);
-    if (wanted > this.hitProgress) {
-      this.hitProgress += (wanted - this.hitProgress) * (1 - Math.exp(-dt * FOLLOW_RATE));
-    }
-    const p = this.hitProgress;
-    const b = this.ball;
-    b.x = hop.from.x + (hop.to.x - hop.from.x) * 0.5 * p;
-    b.z = hop.from.z + (hop.to.z - hop.from.z) * 0.5 * p;
-    b.y = this.padY + ARC_HEIGHT * (1 - (1 - p) * (1 - p));
-    // Only for the camera and the marble's spin; position comes from the hand.
-    b.vx = (hop.to.x - hop.from.x) / HOP_SECONDS;
-    b.vz = (hop.to.z - hop.from.z) / HOP_SECONDS;
-  }
-
-  private acceptGesture(g: Gesture): void {
-    if (this.state !== 'jumpLift' && this.state !== 'jumpWindow') return;
-    if (g.t0 < this.windowOpenedAt) return;
-    if (g.cm < IGNORE_BELOW_CM) {
-      // A tremor: settle back on the pad with no penalty.
-      this.state = 'jumpWindow';
-      this.hitProgress = 0;
-      this.ball.y = this.padY;
-      this.ball.vx = 0;
-      this.ball.vz = 0;
+    if (this.isDeliberateTilt()) {
+      const size = Math.hypot(this.tiltX, this.tiltY);
+      const match = (this.tiltX * this.hopDirX + this.tiltY * this.hopDirY) / size;
+      if (match >= DIRECTION_MATCH) this.jump();
+      else this.jumpWrongWay(this.tiltX / size, -this.tiltY / size);
       return;
     }
-    this.launch(g.cm);
+    this.windowLeft -= dt;
+    if (this.windowLeft <= 0) this.jumpTooLate();
   }
 
-  private launch(cm: number): void {
+  // Over far enough, and not merely on the way back from however the phone was held on arrival.
+  private isDeliberateTilt(): boolean {
+    if (Math.hypot(this.tiltX, this.tiltY) < TILT_TO_ACT) return false;
+    const movedX = this.tiltX - this.heldX;
+    const movedY = this.tiltY - this.heldY;
+    if (Math.hypot(movedX, movedY) < TILT_CHANGE_TO_ACT) return false;
+    return movedX * this.tiltX + movedY * this.tiltY > 0;
+  }
+
+  private tiltsAgainstHop(): boolean {
+    const size = Math.hypot(this.tiltX, this.tiltY);
+    if (size < TILT_TO_ACT) return false;
+    return -(this.tiltX * this.hopDirX + this.tiltY * this.hopDirY) / size >= DIRECTION_MATCH;
+  }
+
+  private jump(): void {
     const hop = this.hop!;
-    const band = bandFor(cm);
-    this.lastBand = band;
-    this.lastCm = cm;
-    if (band === 'perfect') this.perfects++;
+    this.flightOk = true;
+    this.flightFailed = false;
+    this.tiltedBack = false;
+    this.launchTo(hop.to.x, hop.to.z);
+    this.onCallout?.('JUMP', 'good');
+    log('jump', { event: 'launch', result: 'ok' });
+  }
 
-    // Picks up from wherever the hand carried the marble, never turning back along the arc.
-    // A full swing leaves it at the apex with half the hop's time left, so it just falls.
+  // The full distance, but the way the player tilted rather than the way to the next pad.
+  private jumpWrongWay(dirX: number, dirZ: number): void {
+    const hop = this.hop!;
+    const distance = Math.hypot(hop.to.x - hop.from.x, hop.to.z - hop.from.z);
+    this.flightOk = false;
+    this.flightFailed = true;
+    this.launchTo(hop.from.x + dirX * distance, hop.from.z + dirZ * distance);
+    this.onCallout?.('WRONG WAY', 'bad');
+    log('jump', { event: 'launch', result: 'wrong' });
+  }
+
+  private jumpTooLate(): void {
+    const hop = this.hop!;
+    this.flightOk = false;
+    this.flightFailed = true;
+    this.launchTo(hop.from.x + (hop.to.x - hop.from.x) * LATE_REACH, hop.from.z + (hop.to.z - hop.from.z) * LATE_REACH);
+    this.onCallout?.('TOO LATE', 'bad');
+    log('jump', { event: 'launch', result: 'late' });
+  }
+
+  private launchTo(x: number, z: number): void {
+    const hop = this.hop!;
     const b = this.ball;
-    const carried = this.hitProgress * 0.5;
-    const landAt = Math.max(REACH[band], carried + 0.05);
-    const targetX = hop.from.x + (hop.to.x - hop.from.x) * landAt;
-    const targetZ = hop.from.z + (hop.to.z - hop.from.z) * landAt;
-    const remaining = Math.max(MIN_FALL_SECONDS, HOP_SECONDS * (1 - carried));
-    b.vx = (targetX - b.x) / remaining;
-    b.vz = (targetZ - b.z) / remaining;
-    b.vy = (hop.to.y - b.y + 0.5 * GRAVITY * remaining * remaining) / remaining;
-
+    b.vx = (x - b.x) / HOP_SECONDS;
+    b.vz = (z - b.z) / HOP_SECONDS;
+    b.vy = (hop.to.y - b.y + 0.5 * GRAVITY * HOP_SECONDS * HOP_SECONDS) / HOP_SECONDS;
     b.grounded = false;
     this.state = 'flight';
     this.accumulator = 0;
     this.onCue?.('hit');
-    this.onCallout?.(LABEL[band], band === 'perfect' || band === 'good' ? 'good' : 'bad');
-    log('jump', { event: 'launch', cm, band });
   }
 
   private respawn(): void {
@@ -350,7 +467,7 @@ export class Game {
     const c = this.course.checkpoints[section];
     this.section = section;
     this.ball.placeAt(c.x, c.y, c.z);
-    this.lastGroundY = c.y;
+    this.groundY = c.y;
   }
 
   private finish(): void {
@@ -364,16 +481,8 @@ function clampUnit(v: number): number {
   return Math.max(-1, Math.min(1, v));
 }
 
-function shape(angle: number): number {
+function shape(angle: number, full: number): number {
   const mag = Math.abs(angle);
   if (mag < DEADZONE) return 0;
-  return Math.sign(angle) * Math.min(1, (mag - DEADZONE) / (TILT_FULL - DEADZONE));
-}
-
-function bandFor(cm: number): Band {
-  if (cm <= 0) return 'miss';
-  if (cm < SHORT_BELOW_CM) return 'short';
-  if (cm > LONG_ABOVE_CM) return 'long';
-  if (cm >= PERFECT_FROM_CM && cm <= PERFECT_TO_CM) return 'perfect';
-  return 'good';
+  return Math.sign(angle) * Math.min(1, (mag - DEADZONE) / (full - DEADZONE));
 }
