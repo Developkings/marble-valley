@@ -6,6 +6,7 @@ export type LevelStyle = 'Speed' | 'Maze' | 'Skill' | 'Mix';
 export interface Level extends CourseData {
   style: LevelStyle;
   plan: string[]; // the pieces laid, in order
+  starts: number[]; // the section each one starts on
 }
 
 // Where the road has got to, for a piece being made to carry on from there.
@@ -103,6 +104,20 @@ const meander: Make = (s) => {
     { op: 'run', dir: 'N', len: back + between(s, 8, 16), width: s.w, kind: 'fast' },
   ];
 };
+
+// Stretches placed by hand, in shapes the composer's pieces don't make.
+const diagonalSteps: Make = (s) => {
+  const turn = aside(s);
+  const ops: CourseOp[] = [];
+  for (let i = 0; i < 3; i++) {
+    ops.push({ op: 'bend', to: turn, radius: 11, width: s.w, rail: true }, { op: 'run', dir: turn, len: 5, width: s.w }, { op: 'drop', amount: 2.5 }, { op: 'run', dir: turn, len: 3, width: s.w });
+    ops.push({ op: 'bend', to: s.dir, radius: 11, width: s.w, rail: true }, { op: 'run', dir: s.dir, len: 5, width: s.w }, { op: 'drop', amount: 2.5 }, { op: 'run', dir: s.dir, len: 3, width: s.w });
+  }
+  return ops;
+};
+const plunge: Make = (s) => [{ op: 'run', dir: s.dir, len: 36, width: s.w, kind: 'fast', rise: -12, orbs: 3 }];
+const wideSplit: Make = (s) => [{ op: 'fork', len: 52, width: s.w + 10, island: 10, kinds: ['fast', 'plain'] }];
+const fallingHumps: Make = (s) => [{ op: 'wave', len: 72, width: s.w, hump: 1.8, humps: 4, rise: -8, kind: 'fast', orbs: 4 }];
 
 // Getting your breath back.
 const rest: Make = (s) => [{ op: 'run', dir: s.dir, len: between(s, 8, 16), width: s.w + 4, orbs: 3, orbLane: between(s, -3, 3) }];
@@ -262,16 +277,22 @@ const CLEAR = 3;
 interface Layout {
   ops: CourseOp[];
   plan: string[];
+  starts: number[];
 }
+
+// Stretches of a level to lay by hand in place of what the composer chose, by their number in its plan.
+type ByHand = Record<number, Piece>;
 
 // Lays a level piece by piece on a trial course, so each one can be seen to fit where the road has got to.
 // Nothing is repeated close by, and no piece ever follows the same one twice.
-function compose(seed: number, width: number, acts: Act[]): Layout {
+function compose(seed: number, width: number, acts: Act[], byHand: ByHand = {}): Layout {
   const r = seeded(seed * 104729 + 11);
   const ops: CourseOp[] = [...start(width)];
   const course = new Course({ version: 1, id: 'layout', name: 'layout', ops: [] });
   course.add(ops);
   const plan: string[] = [];
+  const starts: number[] = [];
+  const laidOps: CourseOp[][] = [];
   const used = new Map<string, number>();
   const pairs = new Set<string>();
   const runs = new Set<string>();
@@ -281,8 +302,10 @@ function compose(seed: number, width: number, acts: Act[]): Layout {
   const lay = (name: string, more: CourseOp[]): void => {
     olderThan = lastStart;
     lastStart = course.checkpoints.length;
+    starts.push(lastStart);
     course.add(more);
     ops.push(...more);
+    laidOps.push(more);
     plan.push(name);
     used.set(name, (used.get(name) ?? 0) + 1);
     if (plan.length > 1) pairs.add(`${plan[plan.length - 2]}>${name}`);
@@ -336,14 +359,31 @@ function compose(seed: number, width: number, acts: Act[]): Layout {
       }
     }
   }
-  ops.push(...finish(width, course.end.dir ?? 'N'));
-  return { ops, plan };
+  if (Object.keys(byHand).length === 0) {
+    ops.push(...finish(width, course.end.dir ?? 'N'));
+    return { ops, plan, starts };
+  }
+  // Every op is laid from where the last one ended, so the composer's other choices come out just the same.
+  const final: CourseOp[] = [...start(width)];
+  const road = new Course({ version: 1, id: 'layout', name: 'layout', ops: [] });
+  road.add(final);
+  laidOps.forEach((more, i) => {
+    const hand = byHand[i + 1];
+    const end = road.end;
+    const piece = hand ? hand.make({ r: seeded(seed * 7907 + i), dir: end.dir ?? 'N', w: width, x: end.x, n: i }) : more;
+    if (hand) plan[i] = hand.name;
+    starts[i] = road.checkpoints.length;
+    road.add(piece);
+    final.push(...piece);
+  });
+  final.push(...finish(width, road.end.dir ?? 'N'));
+  return { ops: final, plan, starts };
 }
 
 // Laid out the first time it's needed, as there's no sense composing all twenty to show a menu.
-const level = (n: number, name: string, style: LevelStyle, width: number, acts: () => Act[]): Level => {
+const level = (n: number, name: string, style: LevelStyle, width: number, acts: () => Act[], byHand?: () => ByHand): Level => {
   let laid: Layout | null = null;
-  const layout = () => (laid ??= compose(n, width, acts()));
+  const layout = () => (laid ??= compose(n, width, acts(), byHand?.()));
   return {
     version: 1,
     id: `level-${n}`,
@@ -356,13 +396,21 @@ const level = (n: number, name: string, style: LevelStyle, width: number, acts: 
     get plan() {
       return layout().plan;
     },
+    get starts() {
+      return layout().starts;
+    },
   };
 };
 
 // The way budgets aim at around five minutes for a regular player, about five times the first course
 // driven by test/autopilot.ts. Mazes aim lower, as the driver already knows the way through.
 export const LEVELS: Level[] = [
-  level(1, 'Long Fall', 'Speed', 10, () => [{ pool: pick(FAST, 'downhill', 'cliff', 'kicker', 'sweep', 'snake', 'funnel', 'traverse', 'meander'), way: 2600 }]),
+  level(1, 'Long Fall', 'Speed', 10, () => [{ pool: pick(FAST, 'downhill', 'cliff', 'kicker', 'sweep', 'snake', 'funnel', 'traverse', 'meander'), way: 2600 }], () => ({
+    8: piece('diagonalSteps', diagonalSteps),
+    9: piece('plunge', plunge),
+    10: piece('wideSplit', wideSplit),
+    11: piece('fallingHumps', fallingHumps),
+  })),
   level(2, 'Hedge Walk', 'Maze', 8, () => [
     mazeAct('hedge', 2, 11, 11),
     { pool: pick(CALM, 'rest', 'detour', 'sweep'), way: 120 },

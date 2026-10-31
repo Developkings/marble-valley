@@ -55,6 +55,12 @@ describe('levels', () => {
     });
   }
 
+  it('keeps the stretches of Long Fall picked out by hand apart from its opening', () => {
+    const plan = LEVELS[0].plan;
+    expect(plan.slice(7, 11)).toEqual(['diagonalSteps', 'plunge', 'wideSplit', 'fallingHumps']);
+    expect(plan.slice(0, 4).filter((name) => plan.slice(7, 11).includes(name))).toEqual([]);
+  });
+
   it('has mazes much too big to see across', () => {
     for (const level of LEVELS.filter((l) => l.style === 'Maze')) {
       const mazes = level.ops.filter((op) => op.op === 'maze');
